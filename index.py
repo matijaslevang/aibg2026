@@ -96,7 +96,7 @@ if __name__ == "__main__":
                 new_state = bot.execute_action(action)
                 if isinstance(new_state, dict):
                     bot.turn_count += 1
-                time.sleep(10)
+                time.sleep(0.2)
                 state = new_state if isinstance(new_state, dict) else bot.get_game_state()
             else:
                 time.sleep(0.5)

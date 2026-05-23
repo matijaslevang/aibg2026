@@ -11,6 +11,9 @@ Returns an action dict:
   {'type': 'skip'}
 """
 
+# items block movement, so they must be picked up to move onto that cell
+# summons block movement and can be attacked like players, but have no inventory or cards and don't
+
 from helper_fun import convert_to_grid
 
 BOARD_W = 32
