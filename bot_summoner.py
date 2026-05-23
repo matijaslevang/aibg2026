@@ -6,4 +6,5 @@ and deployed eagerly — the bot keeps summons on the board to threaten the
 opponent's movement and chip HP. Less focused on direct item collection.
 """
 from index import run
-run('summoner')
+if __name__ == '__main__':
+    run('summoner')

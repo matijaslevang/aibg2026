@@ -6,4 +6,5 @@ mobility and loot collection over aggression — waits for the opponent to
 make mistakes rather than forcing fights.
 """
 from index import run
-run('defensive')
+if __name__ == '__main__':
+    run('defensive')

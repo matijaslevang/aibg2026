@@ -5,4 +5,5 @@ Well-rounded play: moderate aggression, values HP and zone safety equally,
 summons when sensible, picks up loot opportunistically.
 """
 from index import run
-run('balanced')
+if __name__ == '__main__':
+    run('balanced')

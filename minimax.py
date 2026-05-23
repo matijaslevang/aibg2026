@@ -14,6 +14,8 @@ Returns an action dict:
 # items block movement, so they must be picked up to move onto that cell
 # summons block movement and can be attacked like players, but have no inventory or cards and don't
 
+import time
+from multiprocessing import Pool
 from helper_fun import convert_to_grid
 
 BOARD_W = 32
@@ -975,21 +977,42 @@ def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset(), W=No
 
 # ─────────────────────────── Public entry point ─────────────────────────────
 
-def decide(raw_state, my_id, depth=3, turn=0, recent_positions=None, preset='balanced',
-           my_attacked_last=False):
+def _search_root(args):
+    """Worker: search one root action to the given depth. Must be top-level for pickling."""
+    state, action, depth, my_id, avoid_xy, W = args
+    next_state = state.apply_action(my_id, action)
+    val, _ = minimax(next_state, depth - 1, -float('inf'), float('inf'),
+                     my_id, False, avoid_xy, W)
+    return val, action
+
+
+def decide(raw_state, my_id, depth=12, turn=0, recent_positions=None, preset='balanced',
+           my_attacked_last=False, time_limit=20.0):
     """
     Call this on your turn with the raw server JSON and your player ID.
-    `turn`             — current game turn counter (tracked externally).
-    `recent_positions` — list of (x,y) tuples visited recently (anti-oscillation).
-    `preset`           — strategy preset: 'balanced' | 'aggressive' | 'defensive' | 'summoner'
-    `my_attacked_last` — True if this player attacked on their previous turn (no consecutive attacks).
-    Returns the best action dict.
+    Iterative deepening with root moves searched in parallel across up to 6 workers.
     """
     W     = PRESETS.get(preset, PRESETS['balanced'])
     state = GameState.from_json(raw_state, turn=turn)
     if my_id in state.players:
         state.players[my_id]['attacked_last'] = my_attacked_last
     avoid_xy = frozenset(recent_positions or [])
-    _, action = minimax(state, depth, -float('inf'), float('inf'), my_id,
-                          is_max=True, avoid_xy=avoid_xy, W=W)
-    return action
+
+    actions = state.generate_actions(my_id)
+    if len(actions) == 1:
+        return actions[0]
+
+    deadline    = time.time() + time_limit
+    best_action = actions[0]
+    workers     = min(len(actions), 6)
+
+    with Pool(processes=workers) as pool:
+        for d in range(1, depth + 1):
+            if time.time() >= deadline:
+                break
+            args    = [(state, a, d, my_id, avoid_xy, W) for a in actions]
+            results = pool.map(_search_root, args)
+            best_val, best_action = max(results, key=lambda r: r[0])
+            print(f"[minimax] depth {d} done, best={best_val:.0f}, {deadline - time.time():.1f}s remaining")
+
+    return best_action
