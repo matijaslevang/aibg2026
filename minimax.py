@@ -66,10 +66,11 @@ class GameState:
         self.board_w  = BOARD_W
         self.board_h  = BOARD_H
         self.turn     = 0
-        self._base    = None   # List[List[int]], shared
-        self.occupied = set()
-        self.players  = {}
-        self.summons  = []
+        self._base      = None   # List[List[int]], shared
+        self.occupied   = set()
+        self.players    = {}
+        self.summons    = []
+        self.floor_items = {}   # {(x,y): item_dict}
 
     # ── Construction ──────────────────────────────────────────────────────────
 
@@ -121,6 +122,18 @@ class GameState:
                 'is_first':  bool(p.get('First', False)),
             }
 
+        # Parse floor items from grid
+        for field in grid_fields:
+            if not isinstance(field, dict):
+                continue
+            raw_item = field.get('Item')
+            if _none(raw_item) or not isinstance(raw_item, dict):
+                continue
+            pos = field.get('Position', {})
+            ix = int(pos.get('X', 0)) if isinstance(pos, dict) else 0
+            iy = int(pos.get('Y', 0)) if isinstance(pos, dict) else 0
+            s.floor_items[(ix, iy)] = _parse_item(raw_item)
+
         # Parse summoned monsters from grid entity fields
         for field in grid_fields:
             if not isinstance(field, dict):
@@ -161,7 +174,8 @@ class GameState:
             cp['cards']     = [dict(c) if c else None for c in p['cards']]
             cp['statuses']  = dict(p['statuses'])
             s.players[pid]  = cp
-        s.summons = [dict(sm) for sm in self.summons]
+        s.summons      = [dict(sm) for sm in self.summons]
+        s.floor_items  = dict(self.floor_items)
         return s
 
     # ── Grid helpers ──────────────────────────────────────────────────────────
@@ -226,15 +240,22 @@ class GameState:
         for item in me['inventory']:
             actions.append({'type': 'use_item', 'item_id': item['id'], '_item': item})
 
-        # Summon (card with cooldown_counter == 0, on a free adjacent cell)
+        # Summon (card with cooldown_counter == 0, on any free adjacent cell)
         adj = [(me['x'] + dx, me['y'] + dy)
                for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]
                if self.walkable(me['x'] + dx, me['y'] + dy)]
-        if adj:
-            for card in me['cards']:
-                if card and card['cooldown_counter'] == 0:
+        for card in me['cards']:
+            if card and card['cooldown_counter'] == 0:
+                for sx, sy in adj:
                     actions.append({'type': 'summon', 'card_id': card['id'], '_card': card,
-                                    'x': adj[0][0], 'y': adj[0][1]})
+                                    'x': sx, 'y': sy})
+
+        # Pick up item on current cell or adjacent cells
+        for dx, dy in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]:
+            tx, ty = me['x'] + dx, me['y'] + dy
+            if (tx, ty) in self.floor_items:
+                item = self.floor_items[(tx, ty)]
+                actions.append({'type': 'pick_up', 'x': tx, 'y': ty, '_item': item})
 
         # Move
         for nx, ny in self.move_options(player_id):
@@ -292,6 +313,12 @@ class GameState:
                 opp_ids = [pid for pid in s.players if pid != player_id]
                 if opp_ids:
                     s.players[opp_ids[0]]['statuses']['Frozen'] = item.get('duration', 1)
+
+        elif t == 'pick_up':
+            pos = (action['x'], action['y'])
+            if pos in s.floor_items:
+                item = s.floor_items.pop(pos)
+                me['inventory'].append(item)
 
         elif t == 'summon':
             card = action.get('_card', {})

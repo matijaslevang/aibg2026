@@ -63,6 +63,8 @@ class BotTemplate:
             return api_calls.move(gid, pid, action['x'], action['y'])
         elif t == 'attack':
             return api_calls.attack(gid, pid, action['target_id'])
+        elif t == 'pick_up':
+            return api_calls.pick_up_entity(gid, pid, action['x'], action['y'])
         elif t == 'use_item':
             return api_calls.use_item(gid, pid, action['item_id'])
         elif t == 'summon':
@@ -90,7 +92,7 @@ if __name__ == "__main__":
             if bot.is_my_turn(state):
                 print(f"My turn! (turn {bot.turn_count})", flush=True)
                 print_state(state)
-                action    = decide(state, bot.player_id, depth=4, turn=bot.turn_count)
+                action    = decide(state, bot.player_id, depth=5, turn=bot.turn_count)
                 new_state = bot.execute_action(action)
                 if isinstance(new_state, dict):
                     bot.turn_count += 1
