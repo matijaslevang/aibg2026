@@ -745,7 +745,8 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
         else:
             score += me['atk'] * 5   # in range to deal meaningful damage
     # Mirror: heavily penalise giving the opponent a one-shot on us
-    if dist <= opp['atk_range'] and opp['atk'] >= me_ehp:
+    # Use real HP (not effective HP) — potions in pocket don't absorb incoming attacks
+    if dist <= opp['atk_range'] and opp['atk'] >= me['hp']:
         score -= 6000
 
     # Coordinated kill: player weakens a target that an allied summon can then finish
