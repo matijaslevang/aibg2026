@@ -19,15 +19,11 @@ class Cell:
         self.h = 0
 
 
-# Define the size of the grid
-ROW = 9
-COL = 10
-
 # Check if a cell is valid (within the grid)
 
 
-def is_valid(row, col):
-    return (row >= 0) and (row < ROW) and (col >= 0) and (col < COL)
+def is_valid(row, col, row_count, col_count):
+    return (row >= 0) and (row < row_count) and (col >= 0) and (col < col_count)
 
 # Check if a cell is unblocked
 
@@ -78,8 +74,16 @@ def trace_path(cell_details, dest):
 
 
 def a_star_search(grid, src, dest):
+    # Validate the incoming grid and compute dimensions.
+    if not grid or not isinstance(grid, list) or not grid[0]:
+        print("Grid is invalid or empty")
+        return
+
+    ROW = len(grid)
+    COL = len(grid[0])
+
     # Check if the source and destination are valid
-    if not is_valid(src[0], src[1]) or not is_valid(dest[0], dest[1]):
+    if not is_valid(src[0], src[1], ROW, COL) or not is_valid(dest[0], dest[1], ROW, COL):
         print("Source or destination is invalid")
         return
 
@@ -125,14 +129,13 @@ def a_star_search(grid, src, dest):
         closed_list[i][j] = True
 
         # For each direction, check the successors
-        directions = [(0, 1), (0, -1), (1, 0), (-1, 0),
-                      (1, 1), (1, -1), (-1, 1), (-1, -1)]
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
         for dir in directions:
             new_i = i + dir[0]
             new_j = j + dir[1]
 
             # If the successor is valid, unblocked, and not visited
-            if is_valid(new_i, new_j) and is_unblocked(grid, new_i, new_j) and not closed_list[new_i][new_j]:
+            if is_valid(new_i, new_j, ROW, COL) and is_unblocked(grid, new_i, new_j) and not closed_list[new_i][new_j]:
                 # If the successor is the destination
                 if is_destination(new_i, new_j, dest):
                     # Set the parent of the destination cell

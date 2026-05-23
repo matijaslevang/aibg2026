@@ -5,9 +5,9 @@ See README.md for full API documentation
 import requests
 import sys
 import time
+import random
 from search import a_star_search
 from helper_fun import convert_to_grid
-import json
 
 class BotTemplate:
     def __init__(self, server_url, game_id, bot_name):
@@ -46,6 +46,12 @@ class BotTemplate:
             return False
         return game_state.get('GameState', '') == 'Ending'
 
+    def submit_move(self, x, y):
+        url = f"{self.server_url}/player/move/gameId/{self.game_id}"
+        body = {"playerId": self.player_id, "newPosition": {"X": x, "Y": y}}
+        response = requests.put(url, json=body, timeout=5)
+        return response.json() if response.status_code == 200 else None
+
 if __name__ == "__main__":
     if len(sys.argv) < 4:
         print("Usage: python bot_template.py <server_url> <game_id> <bot_name>")
@@ -63,21 +69,26 @@ if __name__ == "__main__":
         while state and not bot.is_game_over(state):
             if bot.is_my_turn(state):
                 print("My turn!")
-                # TODO: Implement your strategy here
-                # See README.md for available endpoints
-                print(state)
-                parsed = json.loads(state)
+                grid = convert_to_grid(state['Map'])
 
-                poz = parsed['Players'][str(bot.player_id)]['Position']
+                poz_raw = state['Players'][str(bot.player_id)]['Position']
+                if isinstance(poz_raw, dict):
+                    poz = (poz_raw['Y'], poz_raw['X'])  # grid is grid[row=Y][col=X]
+                else:
+                    poz = (poz_raw[1], poz_raw[0])
 
-                # random destination for now
-                dest = (poz[0] + 1, poz[1])
+                walkable = [
+                    (r, c)
+                    for r, row in enumerate(grid)
+                    for c, cell in enumerate(row)
+                    if cell == 1 and (r, c) != poz
+                    and abs(r - poz[0]) + abs(c - poz[1]) <= 4
+                ]
+                dest = random.choice(walkable) if walkable else poz
 
-                # Call the A* search algorithm
-                a_star_search(convert_to_grid(parsed['Board']), poz, dest)
-
-                time.sleep(0.5)
-                state = bot.get_game_state()
+                a_star_search(grid, poz, dest)
+                new_state = bot.submit_move(dest[1], dest[0])  # API wants (X, Y)
+                state = new_state if new_state else bot.get_game_state()
             else:
                 time.sleep(0.5)
                 state = bot.get_game_state()
