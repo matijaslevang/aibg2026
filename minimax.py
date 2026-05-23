@@ -408,13 +408,10 @@ class GameState:
     # ── Action generation ─────────────────────────────────────────────────────
 
     def move_options(self, player_id):
-        """All reachable destinations in each cardinal direction. Snow tiles cost 2 (including the starting tile)."""
+        """All reachable destinations in each cardinal direction.
+        Snow tile cost: +1 for leaving a snow tile, +1 for entering a snow tile (matches server model)."""
         me = self.players[player_id]
         px, py, max_d = me['x'], me['y'], me['move_dist']
-        # Standing on a snow tile burns 1 MP before you take your first step
-        if self._base is not None and 0 <= py < len(self._base) and 0 <= px < len(self._base[py]):
-            if self._base[py][px] == 2:
-                max_d -= 1
         options = []
         for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
             remaining = max_d
@@ -427,7 +424,9 @@ class GameState:
                     break
                 if (nx, ny) in self.floor_items or (nx, ny) in self.floor_cards:
                     break
-                cost = 2 if self._base[ny][nx] == 2 else 1
+                leave_snow = self._base is not None and self._base[cy][cx] == 2
+                enter_snow = self._base is not None and self._base[ny][nx] == 2
+                cost = 1 + (1 if leave_snow else 0) + (1 if enter_snow else 0)
                 if cost > remaining:
                     break
                 remaining -= cost
@@ -710,7 +709,9 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     score = 0.0
 
     # HP advantage (effective HP accounts for healing items in inventory)
-    score += (me_ehp - opp_ehp) * W['hp']
+    # Weight increases as turn 100 approaches — HP lead becomes decisive late-game
+    turn_urgency = 1.0 + min(1.0, state.turn / 70) * 2
+    score += (me_ehp - opp_ehp) * W['hp'] * turn_urgency
 
     # Zone safety (linear ramp: 0 at turn 0 → 1.0 at phase turn)
     me_prox  = zone_proximity(me['x'],  state.turn, lookahead, state.board_w)
