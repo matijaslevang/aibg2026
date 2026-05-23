@@ -94,7 +94,7 @@ if __name__ == "__main__":
             if bot.is_my_turn(state):
                 print(f"My turn! (turn {bot.turn_count})", flush=True)
                 print_state(state)
-                action    = decide(state, bot.player_id, depth=5, turn=bot.turn_count)
+                action    = decide(state, bot.player_id, depth=8, turn=bot.turn_count)
                 new_state = bot.execute_action(action)
                 if isinstance(new_state, dict):
                     bot.turn_count += 1
