@@ -24,10 +24,18 @@ def use_item(game_id: int, player_id: int, item_id: int):
     print(f"Server response ({response.status_code}): {response.text}", flush=True)
     return response.json() if response.status_code == 200 else None
 
-def pick_up_entity(game_id: int, player_id: int, picking_up_x: int, picking_up_y: int):
+def pick_up_monster_card(game_id: int, player_id: int, picking_up_x: int, picking_up_y: int):
     url = f"{SERVER_URL}/map/pickup/{player_id}/gameId/{game_id}"
     body = {"Position": {"X": picking_up_x, "Y": picking_up_y}}
-    print(f"Submitting move: player:{player_id} is trying to pick up something on x:{picking_up_x}, y:{picking_up_y}", flush=True)
+    print(f"Submitting move: player:{player_id} is trying to pick up a monster card on x:{picking_up_x}, y:{picking_up_y}", flush=True)
+    response = requests.put(url, json=body)
+    print(f"Server response ({response.status_code}): {response.text}", flush=True)
+    return response.json() if response.status_code == 200 else None
+
+def pick_up_item(game_id: int, player_id: int, picking_up_x: int, picking_up_y: int):
+    url = f"{SERVER_URL}/player/pickup/{player_id}/gameId/{game_id}"
+    body = {"Position": {"X": picking_up_x, "Y": picking_up_y}}
+    print(f"Submitting move: player:{player_id} is trying to pick up an item on x:{picking_up_x}, y:{picking_up_y}", flush=True)
     response = requests.put(url, json=body)
     print(f"Server response ({response.status_code}): {response.text}", flush=True)
     return response.json() if response.status_code == 200 else None
@@ -39,6 +47,11 @@ def summon(game_id: int, player_id: int, card_id: int, summoning_on_x: int, summ
     response = requests.put(url, json=body)
     print(f"Server response ({response.status_code}): {response.text}", flush=True)
     return response.json() if response.status_code == 200 else None
+
+if __name__ == "__main__":
+    url = f"http://localhost:8080/game/state/e86c1d33-e02f-41e5-bb11-a50baf6cbdaf"
+    response = requests.get(url)
+    print(response)
 
 
 
