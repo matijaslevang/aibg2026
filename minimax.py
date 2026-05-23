@@ -334,6 +334,38 @@ def zone_danger(x, _y, turn, lookahead, board_w):
     return False
 
 
+def zone_proximity(x, turn, lookahead, board_w, decay_tiles=8, decay_turns=10):
+    """
+    0.0–1.0 proximity score combining distance to the danger boundary
+    and how soon the next zone phase activates.
+    Both factors must be non-zero for the result to be non-zero.
+    """
+    t = turn + lookahead
+
+    # Determine active boundary and turns until next phase
+    if t >= 30:
+        left, right = 6, board_w - 6
+        turns_until = 0  # already active
+    elif t >= 15:
+        left, right = 3, board_w - 3
+        turns_until = max(0, 30 - t)
+    else:
+        left, right = 3, board_w - 3
+        turns_until = max(0, 15 - t)
+
+    # Turn-based urgency: ramps up over `decay_turns` turns before activation
+    turn_factor = max(0.0, 1.0 - turns_until / decay_turns)
+    if turn_factor == 0.0:
+        return 0.0
+
+    if x < left or x >= right:
+        return turn_factor  # inside zone, full turn factor
+
+    dist = min(x - left, right - 1 - x)
+    dist_factor = max(0.0, 1.0 - dist / decay_tiles)
+    return turn_factor * dist_factor
+
+
 # ─────────────────────────── Evaluation function ────────────────────────────
 
 def evaluate(state, my_id, lookahead):
@@ -355,21 +387,21 @@ def evaluate(state, my_id, lookahead):
     # HP advantage (weight 2)
     score += (me['hp'] - opp['hp']) * 2.0
 
-    # Zone safety prediction
-    me_danger  = zone_danger(me['x'],  me['y'],  state.turn, lookahead, state.board_w)
-    opp_danger = zone_danger(opp['x'], opp['y'], state.turn, lookahead, state.board_w)
-    if me_danger:
-        score -= 600
+    # Zone safety prediction (scaled by distance + turn proximity)
+    me_prox  = zone_proximity(me['x'],  state.turn, lookahead, state.board_w)
+    opp_prox = zone_proximity(opp['x'], state.turn, lookahead, state.board_w)
+    if me_prox > 0:
+        score -= 600 * me_prox
         if any('freeze' in (i.get('name') or '').lower() for i in opp['inventory']):
-            score -= 1200  # opponent can freeze us while we're near the edge
-    if opp_danger:
-        score += 400
+            score -= 1200 * me_prox  # opponent can freeze us while we're near the edge
+    if opp_prox > 0:
+        score += 400 * opp_prox
         if any('freeze' in (i.get('name') or '').lower() for i in me['inventory']):
-            score += 2500  # we can freeze them into the danger zone
+            score += 2500 * opp_prox  # we can freeze them into the danger zone
 
     # Gravity toward safe center
     cx = state.board_w // 2
-    score += (abs(opp['x'] - cx) - abs(me['x'] - cx)) * 3.0
+    score += (abs(opp['x'] - cx) - abs(me['x'] - cx)) * 1.5
 
     # Aggression: close in when ahead on HP, kite when behind
     dist = abs(me['x'] - opp['x']) + abs(me['y'] - opp['y'])
@@ -382,7 +414,7 @@ def evaluate(state, my_id, lookahead):
     for item in opp['inventory']:
         n = (item.get('name') or '').lower()
         if 'freeze' in n:
-            score -= 80 if me_danger else 40
+            score -= 80 if me_prox > 0 else 40
 
     # Summon army strength
     my_pow  = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == my_id)

@@ -1,11 +1,18 @@
 """Monster Hunt Bot — Minimax strategy
 Usage: python index.py <server_url> <game_id> <bot_name>
 """
+import json
 import requests
 import sys
 import time
 from minimax import decide
 import api_calls
+
+
+def print_state(state):
+    # Strip the Grid to keep output readable
+    condensed = {k: v for k, v in state.items() if k != 'Map'}
+    print(json.dumps(condensed, indent=2), flush=True)
 
 
 class BotTemplate:
@@ -82,6 +89,7 @@ if __name__ == "__main__":
         while state and not bot.is_game_over(state):
             if bot.is_my_turn(state):
                 print(f"My turn! (turn {bot.turn_count})", flush=True)
+                print_state(state)
                 action    = decide(state, bot.player_id, depth=4, turn=bot.turn_count)
                 new_state = bot.execute_action(action)
                 if isinstance(new_state, dict):
