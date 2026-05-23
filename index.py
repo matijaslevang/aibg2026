@@ -16,10 +16,11 @@ def print_state(state):
 
 
 class BotTemplate:
-    def __init__(self, server_url, game_id, bot_name):
+    def __init__(self, server_url, game_id, bot_name, preset='balanced'):
         self.server_url = server_url.rstrip('/')
         self.game_id    = game_id
         self.bot_name   = bot_name
+        self.preset      = preset
         self.player_id       = None
         self.turn_count      = 0
         self.recent_positions = []   # last 4 positions for oscillation detection
@@ -83,12 +84,15 @@ class BotTemplate:
             return None
 
 
-if __name__ == "__main__":
+def run(preset='balanced'):
+    """Start the bot. Call with a preset name or run this file directly."""
     if len(sys.argv) < 4:
-        print("Usage: python index.py <server_url> <game_id> <bot_name>")
+        print("Usage: python index.py <server_url> <game_id> <bot_name> [preset]")
+        print("  preset: balanced (default) | aggressive | defensive | summoner")
         sys.exit(1)
 
-    bot = BotTemplate(sys.argv[1], sys.argv[2], sys.argv[3])
+    bot = BotTemplate(sys.argv[1], sys.argv[2], sys.argv[3], preset=preset)
+    print(f"Strategy preset: {preset}", flush=True)
 
     while not (state := bot.get_game_state()) or not bot.find_my_player_id(state):
         time.sleep(0.5)
@@ -101,8 +105,7 @@ if __name__ == "__main__":
             if bot.is_my_turn(state):
                 print(f"My turn! (turn {bot.turn_count})", flush=True)
                 print_state(state)
-                # Record current position before moving
-                me = state.get('Players', {}).get(str(bot.player_id), {})
+                me  = state.get('Players', {}).get(str(bot.player_id), {})
                 pos = me.get('Position', {})
                 if isinstance(pos, dict) and 'X' in pos:
                     cur_xy = (int(pos['X']), int(pos['Y']))
@@ -110,14 +113,13 @@ if __name__ == "__main__":
                     if len(bot.recent_positions) > 4:
                         bot.recent_positions.pop(0)
 
-                action    = decide(state, bot.player_id, depth=4, turn=bot.turn_count,
-                                   recent_positions=bot.recent_positions)
+                action = decide(state, bot.player_id, depth=4, turn=bot.turn_count,
+                                recent_positions=bot.recent_positions, preset=bot.preset)
 
-                # Detect confusion — server reverses our move commands when confused
-                me_raw    = state.get('Players', {}).get(str(bot.player_id), {})
-                statuses  = me_raw.get('ActiveStatuses') or {}
-                confused  = bool(statuses.get('Confused') or statuses.get('Confusion'))
-                cur_xy    = (int(pos['X']), int(pos['Y'])) if isinstance(pos, dict) and 'X' in pos else None
+                me_raw   = state.get('Players', {}).get(str(bot.player_id), {})
+                statuses = me_raw.get('ActiveStatuses') or {}
+                confused = bool(statuses.get('Confused') or statuses.get('Confusion'))
+                cur_xy   = (int(pos['X']), int(pos['Y'])) if isinstance(pos, dict) and 'X' in pos else None
                 new_state = bot.execute_action(action, is_confused=confused, cur_pos=cur_xy)
                 if isinstance(new_state, dict):
                     bot.turn_count += 1
@@ -128,3 +130,8 @@ if __name__ == "__main__":
                 state = bot.get_game_state()
     except KeyboardInterrupt:
         print("\nBot stopped by user")
+
+
+if __name__ == "__main__":
+    preset = sys.argv[4] if len(sys.argv) > 4 else 'balanced'
+    run(preset)

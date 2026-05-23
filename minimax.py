@@ -508,9 +508,46 @@ def zone_proximity(x, turn, lookahead, board_w, decay_tiles=8):
     return best
 
 
+# ─────────────────────────── Strategy presets ───────────────────────────────
+
+_BALANCED = {
+    'hp':             2.0,   # HP advantage multiplier
+    'zone_me':        600,   # penalty for us being near zone boundary
+    'zone_opp':       400,   # bonus for opponent being near zone boundary
+    'center':         1.5,   # gravity toward board center
+    'aggr_base':      2.0,   # base aggression (chasing opponent)
+    'mobility':       12,    # value of extra move options
+    'summon_str':     1.2,   # army strength multiplier (hp+atk per summon)
+    'card_ready':     80,    # value of a ready card in hand
+    'card_cd':        55,    # value of a card on cooldown
+    'opp_card_ready': 75,    # how much to fear opponent's ready card
+    'opp_card_cd':    25,
+    'loot':           0.4,   # floor item/card proximity scale
+}
+
+PRESETS = {
+    'balanced': _BALANCED,
+    'aggressive': {**_BALANCED,
+        'hp': 1.0, 'zone_me': 350, 'aggr_base': 4.5,
+        'mobility': 6, 'summon_str': 1.6, 'card_ready': 70, 'card_cd': 50,
+    },
+    'defensive': {**_BALANCED,
+        'hp': 3.5, 'zone_me': 900, 'aggr_base': 1.2,
+        'mobility': 20, 'loot': 0.6,
+    },
+    'summoner': {**_BALANCED,
+        'summon_str': 3.0, 'card_ready': 120, 'card_cd': 90,
+        'opp_card_ready': 100, 'loot': 0.25,
+    },
+}
+
+
 # ─────────────────────────── Evaluation function ────────────────────────────
 
-def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
+def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
+    if W is None:
+        W = PRESETS['balanced']
+
     opp_ids = [pid for pid in state.players if pid != my_id]
     if not opp_ids:
         return 0.0
@@ -527,36 +564,36 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
     score = 0.0
 
     # HP advantage
-    score += (me['hp'] - opp['hp']) * 2.0
+    score += (me['hp'] - opp['hp']) * W['hp']
 
     # Zone safety (linear ramp: 0 at turn 0 → 1.0 at phase turn)
     me_prox  = zone_proximity(me['x'],  state.turn, lookahead, state.board_w)
     opp_prox = zone_proximity(opp['x'], state.turn, lookahead, state.board_w)
     if me_prox > 0:
-        score -= 600 * me_prox
+        score -= W['zone_me'] * me_prox
         if any('freeze' in (i.get('name') or '').lower() for i in opp['inventory']):
-            score -= 1200 * me_prox
+            score -= W['zone_me'] * 2 * me_prox
     if opp_prox > 0:
-        score += 400 * opp_prox
+        score += W['zone_opp'] * opp_prox
         if any('freeze' in (i.get('name') or '').lower() for i in me['inventory']):
-            score += 2500 * opp_prox
+            score += W['zone_opp'] * 6.25 * opp_prox
 
     # Gravity toward safe center (both axes)
     cx = state.board_w // 2
     cy = state.board_h // 2
-    score += (abs(opp['x'] - cx) - abs(me['x'] - cx)) * 1.5
-    score += (abs(opp['y'] - cy) - abs(me['y'] - cy)) * 1.5
+    score += (abs(opp['x'] - cx) - abs(me['x'] - cx)) * W['center']
+    score += (abs(opp['y'] - cy) - abs(me['y'] - cy)) * W['center']
 
     # Aggression: weight scales up as the zone closes in on either player
     dist = abs(me['x'] - opp['x']) + abs(me['y'] - opp['y'])
-    zone_pressure   = max(me_prox, opp_prox)
-    aggr_weight     = 2.0 * (1.0 + zone_pressure)
+    zone_pressure = max(me_prox, opp_prox)
+    aggr_weight   = W['aggr_base'] * (1.0 + zone_pressure)
     score -= dist * (aggr_weight if me['hp'] >= opp['hp'] else -1.0)
 
     # Mobility: more reachable tiles = more options = safer
     my_moves  = len(state.move_options(my_id))
     opp_moves = len(state.move_options(opp_id))
-    score += (my_moves - opp_moves) * 12
+    score += (my_moves - opp_moves) * W['mobility']
 
     # Confusion penalty — confused movement is reversed and may be random
     if me['statuses'].get('Confused') or me['statuses'].get('Confusion'):
@@ -589,13 +626,23 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
         if 'confus' in (item.get('name') or '').lower() or 'confus' in (item.get('effect') or '').lower():
             score -= me_wall_dirs * 20
 
-    # Monster card values: ready-to-summon cards are especially strong
+    # Monster card values. Boost ready cards further when inventory is full/near-full
+    # and there's a floor card nearby — summoning is the best use of a blocked turn.
+    inv_fullness = inv_sz_me / 3.0
+    nearest_floor_card_dist = min(
+        (abs(me['x'] - fcx) + abs(me['y'] - fcy) for fcx, fcy in state.floor_cards),
+        default=999
+    )
+    near_card_factor = max(0.0, 1.0 - nearest_floor_card_dist / 6.0)
+    summon_bonus = W['card_ready'] * inv_fullness + (W['card_ready'] * near_card_factor if inv_sz_me >= 2 else 0)
+
     for card in (me['cards'] or []):
         if card:
-            score += 100 if card['cooldown_counter'] == 0 else 35
+            base = W['card_ready'] if card['cooldown_counter'] == 0 else W['card_cd']
+            score += base + (summon_bonus if card['cooldown_counter'] == 0 else 0)
     for card in (opp['cards'] or []):
         if card:
-            score -= 75 if card['cooldown_counter'] == 0 else 25
+            score -= W['opp_card_ready'] if card['cooldown_counter'] == 0 else W['opp_card_cd']
 
     # Floor item/card proximity: only value loot reachable before the next reset
     turns_until_reset = 20 - (state.turn % 20) if state.turn % 20 != 0 else 20
@@ -605,25 +652,25 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
     for (ix, iy), field in state.floor_items.items():
         my_d  = abs(me['x'] - ix)  + abs(me['y'] - iy)
         opp_d = abs(opp['x'] - ix) + abs(opp['y'] - iy)
-        my_reachable  = -(-my_d  // my_spd)  < turns_until_reset  # ceil div
+        my_reachable  = -(-my_d  // my_spd)  < turns_until_reset
         opp_reachable = -(-opp_d // opp_spd) < turns_until_reset
         if not my_reachable and not opp_reachable:
             continue
         v = _item_value(_parse_item(field.get('Item', {})),
-                        me['hp'], me['max_hp'], len(me['inventory'])) * 0.4
+                        me['hp'], me['max_hp'], inv_sz_me) * W['loot']
         if my_reachable:
             score += v * max(0.0, 1.0 - my_d  / 10)
         if opp_reachable:
             score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
 
-    for (cx_, cy_), _ in state.floor_cards.items():
-        my_d  = abs(me['x'] - cx_)  + abs(me['y'] - cy_)
-        opp_d = abs(opp['x'] - cx_) + abs(opp['y'] - cy_)
+    for (fcx, fcy), _ in state.floor_cards.items():
+        my_d  = abs(me['x'] - fcx) + abs(me['y'] - fcy)
+        opp_d = abs(opp['x'] - fcx) + abs(opp['y'] - fcy)
         my_reachable  = -(-my_d  // my_spd)  < turns_until_reset
         opp_reachable = -(-opp_d // opp_spd) < turns_until_reset
         if not my_reachable and not opp_reachable:
             continue
-        v = 80 * 0.4
+        v = 80 * W['loot']
         if my_reachable:
             score += v * max(0.0, 1.0 - my_d  / 10)
         if opp_reachable:
@@ -632,7 +679,7 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
     # Summon army strength
     my_pow  = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == my_id)
     opp_pow = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == opp_id)
-    score  += (my_pow - opp_pow) * 0.4
+    score  += (my_pow - opp_pow) * W['summon_str']
 
     # Summon AoE danger: penalise standing in enemy summon attack zones
     my_pos  = (me['x'],  me['y'])
@@ -641,14 +688,14 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
         threatened = _summon_threatened_cells(sm)
         if sm['owner_id'] == opp_id:
             if my_pos in threatened:
-                score -= sm['atk'] * 4   # being in enemy summon AoE is very dangerous
+                score -= sm['atk'] * 4
             if opp_pos in threatened:
-                score += sm['atk'] * 1   # friendly fire on opponent is a bonus
+                score += sm['atk'] * 1
         else:
             if opp_pos in threatened:
-                score += sm['atk'] * 3   # our summon threatens the opponent
+                score += sm['atk'] * 3
             if my_pos in threatened:
-                score -= sm['atk'] * 1   # our own summon hits us
+                score -= sm['atk'] * 1
 
     # Penalise standing on spike tiles
     my_spike  = state.spike_tiles.get((me['x'],  me['y']),  0)
@@ -665,9 +712,9 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
 
 # ─────────────────────────── Minimax ────────────────────────────────────────
 
-def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset()):
+def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset(), W=None):
     if depth == 0 or state.is_game_over():
-        return evaluate(state, my_id, depth, avoid_xy), None
+        return evaluate(state, my_id, depth, avoid_xy, W), None
 
     opp_id     = [pid for pid in state.players if pid != my_id][0]
     current_id = my_id if is_max else opp_id
@@ -678,7 +725,7 @@ def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset()):
         best_val = -float('inf')
         for action in actions:
             val, _ = minimax(state.apply_action(current_id, action),
-                             depth - 1, alpha, beta, my_id, False, avoid_xy)
+                             depth - 1, alpha, beta, my_id, False, avoid_xy, W)
             if val > best_val:
                 best_val, best_action = val, action
             alpha = max(alpha, val)
@@ -689,7 +736,7 @@ def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset()):
         best_val = float('inf')
         for action in actions:
             val, _ = minimax(state.apply_action(current_id, action),
-                             depth - 1, alpha, beta, my_id, True, avoid_xy)
+                             depth - 1, alpha, beta, my_id, True, avoid_xy, W)
             if val < best_val:
                 best_val, best_action = val, action
             beta = min(beta, val)
@@ -700,16 +747,18 @@ def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset()):
 
 # ─────────────────────────── Public entry point ─────────────────────────────
 
-def decide(raw_state, my_id, depth=3, turn=0, recent_positions=None):
+def decide(raw_state, my_id, depth=3, turn=0, recent_positions=None, preset='balanced'):
     """
     Call this on your turn with the raw server JSON and your player ID.
-    `turn` is the current game turn counter (tracked externally).
-    `recent_positions` is a list of (x,y) tuples visited in the last few turns.
+    `turn`     — current game turn counter (tracked externally).
+    `recent_positions` — list of (x,y) tuples visited recently (anti-oscillation).
+    `preset`   — strategy preset: 'balanced' | 'aggressive' | 'defensive' | 'summoner'
     Returns the best action dict.
     """
+    W     = PRESETS.get(preset, PRESETS['balanced'])
     state = GameState.from_json(raw_state, turn=turn)
     avoid_xy = frozenset(recent_positions or [])
     val, action = minimax(state, depth, -float('inf'), float('inf'), my_id,
-                          is_max=True, avoid_xy=avoid_xy)
-    print(f"[minimax] turn={turn} score={val:.1f} action={action}", flush=True)
+                          is_max=True, avoid_xy=avoid_xy, W=W)
+    print(f"[minimax] turn={turn} preset={preset} score={val:.1f} action={action}", flush=True)
     return action
