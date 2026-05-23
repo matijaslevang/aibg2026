@@ -76,18 +76,50 @@ def _item_value(item, holder_hp=None, holder_max_hp=None, inventory_size=0, max_
     return 45 * inv_factor
 
 
-def _summon_threatened_cells(sm):
-    """Return the set of (x, y) cells this summon can attack based on its known stats."""
-    sx, sy = sm['x'], sm['y']
+def _summon_type(sm):
+    """Identify summon type from name (preferred) or ATK stat fallback."""
+    name = (sm.get('name') or '').lower()
+    if 'mage' in name:
+        return 'Ice Mage'
+    if 'warrior' in name:
+        return 'Ice Warrior'
+    if 'cube' in name:
+        return 'Ice Cube'
+    # Fallback: identify by attack power (stable across HP loss)
     atk = sm.get('atk', 20)
     if atk >= 35:
-        # Blue Warrior (ATK~40): extended cross, range 2 in cardinal directions
+        return 'Ice Mage'
+    if atk >= 23:
+        return 'Ice Warrior'
+    return 'Ice Cube'
+
+
+def _summon_kill_bonus(sm):
+    """
+    Returns (attacker_bonus, summoner_bonus) stat dicts when this summon is killed.
+    Attacker gets the larger share; the summoner of the slain monster gets a consolation.
+    """
+    t = _summon_type(sm)
+    if t == 'Ice Mage':
+        return {'atk': 10, 'hp': 0}, {'atk': 5, 'hp': 0}
+    if t == 'Ice Warrior':
+        return {'atk': 0, 'hp': 10}, {'atk': 0, 'hp': 5}
+    # Ice Cube
+    return {'atk': 2, 'hp': 4}, {'atk': 1, 'hp': 2}
+
+
+def _summon_threatened_cells(sm):
+    """Return the set of (x, y) cells this summon can attack."""
+    sx, sy = sm['x'], sm['y']
+    t = _summon_type(sm)
+    if t == 'Ice Mage':
+        # Extended cross, range 2 in cardinal directions
         offsets = [(0, 1), (0, 2), (0, -1), (0, -2), (1, 0), (2, 0), (-1, 0), (-2, 0)]
-    elif atk >= 23:
-        # Ice Golem (ATK~25): asymmetric 6-cell pattern (diagonals + flanks)
+    elif t == 'Ice Warrior':
+        # Asymmetric 6-cell pattern
         offsets = [(-1, -1), (0, -1), (-1, 0), (1, 0), (0, 1), (1, 1)]
     else:
-        # Ice Cube (ATK~20): standard adjacent cross
+        # Ice Cube: standard adjacent cross
         offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)]
     return {(sx + dx, sy + dy) for dx, dy in offsets}
 
@@ -225,12 +257,14 @@ class GameState:
             ey = int(pos.get('Y', 0)) if isinstance(pos, dict) else 0
             s.summons.append({
                 'id':       entity.get('Id'),
+                'name':     (entity.get('Name') or '').strip(),
                 'owner_id': int(owner),
                 'x': ex, 'y': ey,
                 'hp':  int(entity.get('Health', 20)),
                 'atk': int(entity.get('AttackPower', 20)),
                 'inventory': [_parse_item(i) for i in (entity.get('Inventory') or []) if not _none(i)],
             })
+            s.occupied.add((ex, ey))
 
         return s
 
@@ -371,6 +405,11 @@ class GameState:
         if s.turn % 20 == 0:
             s.floor_items.clear()
             s.floor_cards.clear()
+        # Tick down card cooldowns for all players each action
+        for p in s.players.values():
+            for card in p['cards']:
+                if card and card['cooldown_counter'] > 0:
+                    card['cooldown_counter'] -= 1
         me = s.players[player_id]
         t  = action['type']
 
@@ -409,6 +448,15 @@ class GameState:
                             new_summons.append(sm)
                         else:
                             s.occupied.discard((sm['x'], sm['y']))
+                            atk_bonus, sum_bonus = _summon_kill_bonus(sm)
+                            me['atk']    += atk_bonus['atk']
+                            me['hp']     += atk_bonus['hp']
+                            me['max_hp'] += atk_bonus['hp']
+                            if sm['owner_id'] in s.players:
+                                owner = s.players[sm['owner_id']]
+                                owner['atk']    += sum_bonus['atk']
+                                owner['hp']     += sum_bonus['hp']
+                                owner['max_hp'] += sum_bonus['hp']
                     else:
                         new_summons.append(sm)
                 s.summons = new_summons
