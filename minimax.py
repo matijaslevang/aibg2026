@@ -734,11 +734,11 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     score += (abs(opp['x'] - cx) - abs(me['x'] - cx)) * W['center']
     score += (abs(opp['y'] - cy) - abs(me['y'] - cy)) * W['center']
 
-    # Aggression: chase unless significantly behind in HP (>25% disadvantage)
+    # Aggression: chase unless significantly behind in HP (>25% disadvantage).
+    # Opponent near zone → chase harder; we near zone → retreat takes priority.
     dist = abs(me['x'] - opp['x']) + abs(me['y'] - opp['y'])
-    zone_pressure = max(me_prox, opp_prox)
-    aggr_weight   = W['aggr_base'] * (1.0 + zone_pressure)
-    badly_behind  = me['hp'] * 1.25 < opp['hp']
+    aggr_weight  = W['aggr_base'] * (1.0 + opp_prox) * max(0.2, 1.0 - me_prox)
+    badly_behind = me['hp'] * 1.25 < opp['hp']
     score -= dist * (aggr_weight if not badly_behind else -0.5)
 
     # Attack opportunity bonuses (use eHP: opponent may heal before we finish them)
@@ -751,6 +751,14 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     # Use real HP (not effective HP) — potions in pocket don't absorb incoming attacks
     if dist <= opp['atk_range'] and opp['atk'] >= me['hp']:
         score -= 6000
+
+    # Kite positioning: after attacking we can't attack next turn, so being inside
+    # the opponent's range is dangerous; just outside is the ideal re-engage position.
+    if me.get('attacked_last', False):
+        if dist <= opp['atk_range']:
+            score -= me['atk'] * 3
+        elif dist == opp['atk_range'] + 1:
+            score += 150
 
     # Coordinated kill: player weakens a target that an allied summon can then finish
     # — enemy summons —
@@ -903,9 +911,9 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
             # Current AoE: heavy penalty
             if my_pos in threatened:
                 score -= sm['atk'] * 6
-            # Extended (post-move) AoE: moderate penalty to encourage stepping out
+            # Extended (post-move) AoE: penalty to preemptively step clear
             elif my_pos in extended:
-                score -= sm['atk'] * 2
+                score -= sm['atk'] * 4
             if opp_pos in threatened:
                 score += sm['atk'] * 1
         else:
