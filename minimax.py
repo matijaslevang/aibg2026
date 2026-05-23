@@ -74,6 +74,7 @@ class GameState:
         self.players    = {}
         self.summons    = []
         self.floor_items = {}   # {(x,y): item_dict}
+        self.floor_cards = {}   # {(x,y): card_dict}
 
     # ── Construction ──────────────────────────────────────────────────────────
 
@@ -115,7 +116,7 @@ class GameState:
                 'id':        pid,
                 'hp':        int(p.get('Health', 100)),
                 'max_hp':    int(p.get('MaxHealth', 100)),
-                'atk':       int(p.get('AttackPower', 20)),
+                'atk':       int(p.get('AttackPower', 30)),
                 'atk_range': int(p.get('AttackRange', 1)),
                 'move_dist': int(p.get('MaxMoveDistance', 4)),
                 'x': px, 'y': py,
@@ -136,6 +137,20 @@ class GameState:
             ix = int(pos.get('X', 0)) if isinstance(pos, dict) else 0
             iy = int(pos.get('Y', 0)) if isinstance(pos, dict) else 0
             s.floor_items[(ix, iy)] = _parse_item(raw_item)
+
+        # Parse floor monster cards from grid
+        for field in grid_fields:
+            if not isinstance(field, dict):
+                continue
+            raw_card = field.get('MonsterCard')
+            if _none(raw_card) or not isinstance(raw_card, dict):
+                continue
+            pos = field.get('Position', {})
+            cx = int(pos.get('X', 0)) if isinstance(pos, dict) else 0
+            cy = int(pos.get('Y', 0)) if isinstance(pos, dict) else 0
+            parsed = _parse_card(raw_card)
+            if parsed:
+                s.floor_cards[(cx, cy)] = parsed
 
         # Parse summoned monsters from grid entity fields
         for field in grid_fields:
@@ -179,6 +194,7 @@ class GameState:
             s.players[pid]  = cp
         s.summons      = [dict(sm) for sm in self.summons]
         s.floor_items  = dict(self.floor_items)
+        s.floor_cards  = dict(self.floor_cards)
         return s
 
     # ── Grid helpers ──────────────────────────────────────────────────────────
@@ -253,12 +269,15 @@ class GameState:
                     actions.append({'type': 'summon', 'card_id': card['id'], '_card': card,
                                     'x': sx, 'y': sy})
 
-        # Pick up item on current cell or adjacent cells
+        # Pick up items and monster cards on current cell or adjacent cells
         for dx, dy in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]:
             tx, ty = me['x'] + dx, me['y'] + dy
             if (tx, ty) in self.floor_items:
                 item = self.floor_items[(tx, ty)]
-                actions.append({'type': 'pick_up', 'x': tx, 'y': ty, '_item': item})
+                actions.append({'type': 'pick_up_item', 'x': tx, 'y': ty, '_item': item})
+            if (tx, ty) in self.floor_cards:
+                card = self.floor_cards[(tx, ty)]
+                actions.append({'type': 'pick_up_card', 'x': tx, 'y': ty, '_card': card})
 
         # Move
         for nx, ny in self.move_options(player_id):
@@ -317,11 +336,17 @@ class GameState:
                 if opp_ids:
                     s.players[opp_ids[0]]['statuses']['Frozen'] = item.get('duration', 1)
 
-        elif t == 'pick_up':
+        elif t == 'pick_up_item':
             pos = (action['x'], action['y'])
             if pos in s.floor_items:
                 item = s.floor_items.pop(pos)
                 me['inventory'].append(item)
+
+        elif t == 'pick_up_card':
+            pos = (action['x'], action['y'])
+            if pos in s.floor_cards:
+                card = s.floor_cards.pop(pos)
+                me['cards'].append(card)
 
         elif t == 'summon':
             card = action.get('_card', {})
