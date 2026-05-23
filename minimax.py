@@ -62,7 +62,7 @@ def _item_value(item, holder_hp=None, holder_max_hp=None, inventory_size=0, max_
     inv_factor = max(0.1, 1.0 - max(0, inventory_size - max_inventory + 1) * 0.5)
 
     if 'freeze' in n or 'freeze' in e:
-        return 150 * inv_factor
+        return 200 * inv_factor
     if 'heal' in n or 'life' in n or 'potion' in n:
         # Scale heal value by how injured the holder is
         if holder_hp is not None and holder_max_hp and holder_max_hp > 0:
@@ -72,7 +72,7 @@ def _item_value(item, holder_hp=None, holder_max_hp=None, inventory_size=0, max_
             base = 100
         return base * inv_factor
     if 'confus' in n or 'confus' in e:
-        return 55 * inv_factor
+        return 85 * inv_factor
     return 45 * inv_factor
 
 
@@ -253,12 +253,14 @@ class GameState:
             entity = field.get('Entity')
             if _none(entity) or not isinstance(entity, dict):
                 continue
-            owner = entity.get('SummonedByPlayerId')
-            if _none(owner):
-                continue
             pos = field.get('Position', {})
             ex = int(pos.get('X', 0)) if isinstance(pos, dict) else 0
             ey = int(pos.get('Y', 0)) if isinstance(pos, dict) else 0
+            # Block this cell regardless of whether we can parse the owner
+            s.occupied.add((ex, ey))
+            owner = entity.get('SummonedByPlayerId')
+            if _none(owner):
+                continue
             s.summons.append({
                 'id':       entity.get('Id'),
                 'name':     (entity.get('Name') or '').strip(),
@@ -268,7 +270,6 @@ class GameState:
                 'atk': int(entity.get('AttackPower', 20)),
                 'inventory': [_parse_item(i) for i in (entity.get('Inventory') or []) if not _none(i)],
             })
-            s.occupied.add((ex, ey))
 
         return s
 
@@ -718,6 +719,16 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     badly_behind  = me['hp'] * 1.25 < opp['hp']
     score -= dist * (aggr_weight if not badly_behind else -0.5)
 
+    # Attack opportunity bonuses
+    if dist <= me['atk_range']:
+        if me['atk'] >= opp['hp']:
+            score += 8000   # one-shot: near-terminal value
+        else:
+            score += me['atk'] * 5   # in range to deal meaningful damage
+    # Mirror: heavily penalise giving the opponent a one-shot on us
+    if dist <= opp['atk_range'] and opp['atk'] >= me['hp']:
+        score -= 6000
+
     # Mobility: more reachable tiles = more options = safer
     my_moves  = len(state.move_options(my_id))
     opp_moves = len(state.move_options(opp_id))
@@ -784,8 +795,13 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
         opp_reachable = -(-opp_d // opp_spd) < turns_until_reset
         if not my_reachable and not opp_reachable:
             continue
+        # Items on or adjacent to spike tiles are costly to retrieve — discount them
+        spike_nearby = (ix, iy) in state.spike_tiles or any(
+            (ix + ddx, iy + ddy) in state.spike_tiles
+            for ddx, ddy in [(1,0),(-1,0),(0,1),(0,-1)])
+        spike_discount = 0.35 if spike_nearby else 1.0
         v = _item_value(_parse_item(field.get('Item', {})),
-                        me['hp'], me['max_hp'], inv_sz_me) * W['loot']
+                        me['hp'], me['max_hp'], inv_sz_me) * W['loot'] * spike_discount
         if my_reachable:
             score += v * max(0.0, 1.0 - my_d  / 10)
         if opp_reachable:
@@ -809,19 +825,37 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     opp_pow = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == opp_id)
     score  += (my_pow - opp_pow) * W['summon_str']
 
-    # Summon AoE danger: penalise standing in enemy summon attack zones
+    # Summon AoE danger — current position + post-movement extended threat
     my_pos  = (me['x'],  me['y'])
     opp_pos = (opp['x'], opp['y'])
     for sm in state.summons:
+        # Current-position threat
         threatened = _summon_threatened_cells(sm)
+        # Extended threat: union of AoE cells from all positions reachable in one move phase
+        move_d = _summon_move_dist(sm)
+        temp = dict(sm)
+        extended = set(threatened)
+        for _ in range(move_d):
+            # Expand reachable zone one step in each direction
+            for ex, ey in list(extended):
+                for ddx, ddy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                    temp['x'], temp['y'] = ex + ddx, ey + ddy
+                    extended |= _summon_threatened_cells(temp)
+
         if sm['owner_id'] == opp_id:
+            # Current AoE: heavy penalty
             if my_pos in threatened:
-                score -= sm['atk'] * 4
+                score -= sm['atk'] * 6
+            # Extended (post-move) AoE: moderate penalty to encourage stepping out
+            elif my_pos in extended:
+                score -= sm['atk'] * 2
             if opp_pos in threatened:
                 score += sm['atk'] * 1
         else:
             if opp_pos in threatened:
-                score += sm['atk'] * 3
+                score += sm['atk'] * 4
+            elif opp_pos in extended:
+                score += sm['atk'] * 1
             if my_pos in threatened:
                 score -= sm['atk'] * 1
 
