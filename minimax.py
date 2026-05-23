@@ -367,6 +367,10 @@ class GameState:
     def apply_action(self, player_id, action):
         s = self.clone()
         s.turn += 1
+        # Item layout resets every 20 turns; new positions are unknown so clear them
+        if s.turn % 20 == 0:
+            s.floor_items.clear()
+            s.floor_cards.clear()
         me = s.players[player_id]
         t  = action['type']
 
@@ -572,6 +576,19 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
     for item in opp['inventory']:
         score -= _item_value(item, opp['hp'], opp['max_hp'], inv_sz_opp) * 0.8
 
+    # Confusion scroll wall bonus: each wall-adjacent direction the opponent has means
+    # a reversed move hits a wall → random movement instead of controlled movement
+    opp_wall_dirs = sum(1 for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]
+                        if not state._structurally_walkable(opp['x']+dx, opp['y']+dy))
+    me_wall_dirs  = sum(1 for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]
+                        if not state._structurally_walkable(me['x']+dx, me['y']+dy))
+    for item in me['inventory']:
+        if 'confus' in (item.get('name') or '').lower() or 'confus' in (item.get('effect') or '').lower():
+            score += opp_wall_dirs * 25
+    for item in opp['inventory']:
+        if 'confus' in (item.get('name') or '').lower() or 'confus' in (item.get('effect') or '').lower():
+            score -= me_wall_dirs * 20
+
     # Monster card values: ready-to-summon cards are especially strong
     for card in (me['cards'] or []):
         if card:
@@ -580,20 +597,37 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
         if card:
             score -= 75 if card['cooldown_counter'] == 0 else 25
 
-    # Floor item/card proximity: reward being closer than opponent to good loot
+    # Floor item/card proximity: only value loot reachable before the next reset
+    turns_until_reset = 20 - (state.turn % 20) if state.turn % 20 != 0 else 20
+    my_spd  = max(1, me['move_dist'])
+    opp_spd = max(1, opp['move_dist'])
+
     for (ix, iy), field in state.floor_items.items():
-        v = _item_value(_parse_item(field.get('Item', {})),
-                        me['hp'], me['max_hp'], len(me['inventory'])) * 0.4
         my_d  = abs(me['x'] - ix)  + abs(me['y'] - iy)
         opp_d = abs(opp['x'] - ix) + abs(opp['y'] - iy)
-        score += v * max(0.0, 1.0 - my_d  / 10)
-        score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
+        my_reachable  = -(-my_d  // my_spd)  < turns_until_reset  # ceil div
+        opp_reachable = -(-opp_d // opp_spd) < turns_until_reset
+        if not my_reachable and not opp_reachable:
+            continue
+        v = _item_value(_parse_item(field.get('Item', {})),
+                        me['hp'], me['max_hp'], len(me['inventory'])) * 0.4
+        if my_reachable:
+            score += v * max(0.0, 1.0 - my_d  / 10)
+        if opp_reachable:
+            score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
+
     for (cx_, cy_), _ in state.floor_cards.items():
-        v = 80 * 0.4   # cards treated as high-value loot
         my_d  = abs(me['x'] - cx_)  + abs(me['y'] - cy_)
         opp_d = abs(opp['x'] - cx_) + abs(opp['y'] - cy_)
-        score += v * max(0.0, 1.0 - my_d  / 10)
-        score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
+        my_reachable  = -(-my_d  // my_spd)  < turns_until_reset
+        opp_reachable = -(-opp_d // opp_spd) < turns_until_reset
+        if not my_reachable and not opp_reachable:
+            continue
+        v = 80 * 0.4
+        if my_reachable:
+            score += v * max(0.0, 1.0 - my_d  / 10)
+        if opp_reachable:
+            score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
 
     # Summon army strength
     my_pow  = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == my_id)
