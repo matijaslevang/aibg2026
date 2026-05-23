@@ -108,6 +108,10 @@ def _summon_kill_bonus(sm):
     return {'atk': 2, 'hp': 4}, {'atk': 1, 'hp': 2}
 
 
+def _summon_move_dist(sm):
+    return 3 if _summon_type(sm) == 'Ice Cube' else 2
+
+
 def _summon_threatened_cells(sm):
     """Return the set of (x, y) cells this summon can attack."""
     sx, sy = sm['x'], sm['y']
@@ -310,6 +314,81 @@ class GameState:
         if (x, y) in self.floor_items or (x, y) in self.floor_cards:
             return False
         return True
+
+    # ── Summon phase (runs after Player 2 each round) ────────────────────────
+
+    def apply_summon_phase(self, my_id):
+        s = self.clone()
+        opp_ids = [pid for pid in s.players if pid != my_id]
+        if not opp_ids:
+            return s
+        opp_id = opp_ids[0]
+
+        # ── 1. Compute all attacks simultaneously before applying damage ──────
+        player_dmg  = {pid: 0 for pid in s.players}
+        summon_dmg  = {sm['id']: 0 for sm in s.summons}
+        did_attack  = set()
+
+        for sm in s.summons:
+            threatened = _summon_threatened_cells(sm)
+            enemy_pid  = opp_id if sm['owner_id'] == my_id else my_id
+            ep = s.players.get(enemy_pid)
+            if ep and (ep['x'], ep['y']) in threatened:
+                player_dmg[enemy_pid] += sm['atk']
+                did_attack.add(sm['id'])
+            for esm in s.summons:
+                if esm['owner_id'] != sm['owner_id'] and (esm['x'], esm['y']) in threatened:
+                    summon_dmg[esm['id']] = summon_dmg.get(esm['id'], 0) + sm['atk']
+                    did_attack.add(sm['id'])
+
+        # ── 2. Apply damage ───────────────────────────────────────────────────
+        for pid, dmg in player_dmg.items():
+            if dmg > 0:
+                s.players[pid]['hp'] -= dmg
+                if s.players[pid]['hp'] <= 0:
+                    s.occupied.discard((s.players[pid]['x'], s.players[pid]['y']))
+
+        surviving = []
+        for sm in s.summons:
+            dmg = summon_dmg.get(sm['id'], 0)
+            if dmg:
+                sm['hp'] -= dmg
+            if sm['hp'] > 0:
+                surviving.append(sm)
+            else:
+                s.occupied.discard((sm['x'], sm['y']))
+        s.summons = surviving
+
+        # ── 3. Move summons that didn't attack ────────────────────────────────
+        for sm in s.summons:
+            if sm['id'] in did_attack:
+                continue
+            enemy_pid = opp_id if sm['owner_id'] == my_id else my_id
+            ep = s.players.get(enemy_pid)
+            if not ep:
+                continue
+            tx, ty   = ep['x'], ep['y']
+            sx, sy   = sm['x'], sm['y']
+            steps    = _summon_move_dist(sm)
+            s.occupied.discard((sx, sy))
+            for _ in range(steps):
+                best, best_d = None, abs(tx - sx) + abs(ty - sy)
+                for ndx, ndy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                    nx, ny = sx + ndx, sy + ndy
+                    if (s._structurally_walkable(nx, ny)
+                            and (nx, ny) not in s.occupied
+                            and (nx, ny) not in s.floor_items
+                            and (nx, ny) not in s.floor_cards):
+                        d = abs(tx - nx) + abs(ty - ny)
+                        if d < best_d:
+                            best_d, best = d, (nx, ny)
+                if best is None:
+                    break
+                sx, sy = best
+            sm['x'], sm['y'] = sx, sy
+            s.occupied.add((sx, sy))
+
+        return s
 
     # ── Action generation ─────────────────────────────────────────────────────
 
@@ -784,8 +863,9 @@ def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset(), W=No
     else:
         best_val = float('inf')
         for action in actions:
-            val, _ = minimax(state.apply_action(current_id, action),
-                             depth - 1, alpha, beta, my_id, True, avoid_xy, W)
+            next_state = state.apply_action(current_id, action)
+            next_state = next_state.apply_summon_phase(my_id)
+            val, _ = minimax(next_state, depth - 1, alpha, beta, my_id, True, avoid_xy, W)
             if val < best_val:
                 best_val, best_action = val, action
             beta = min(beta, val)
