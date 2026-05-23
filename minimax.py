@@ -131,8 +131,8 @@ def _summon_threatened_cells(sm):
     sx, sy = sm['x'], sm['y']
     t = _summon_type(sm)
     if t == 'Ice Mage':
-        # Extended cross, range 2 in cardinal directions
-        offsets = [(0, 1), (0, 2), (0, -1), (0, -2), (1, 0), (2, 0), (-1, 0), (-2, 0)]
+        # Diagonal range 1
+        offsets = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
     elif t == 'Ice Warrior':
         # Asymmetric 6-cell pattern
         offsets = [(-1, -1), (0, -1), (-1, 0), (1, 0), (0, 1), (1, 1)]

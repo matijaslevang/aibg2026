@@ -99,7 +99,7 @@ def run(preset='balanced'):
                     if len(bot.recent_positions) > 4:
                         bot.recent_positions.pop(0)
 
-                action = decide(state, bot.player_id, depth=7, turn=bot.turn_count,
+                action = decide(state, bot.player_id, depth=5, turn=bot.turn_count,
                                 recent_positions=bot.recent_positions, preset=bot.preset)
 
                 me_raw   = state.get('Players', {}).get(str(bot.player_id), {})
