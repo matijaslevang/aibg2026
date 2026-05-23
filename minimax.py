@@ -217,6 +217,7 @@ class GameState:
                 'cards':     [_parse_card(c) for c in (p.get('Cards') or []) if not _none(c)],
                 'statuses':  dict(p.get('ActiveStatuses') or {}),
                 'is_first':  bool(p.get('First', False)),
+                'attacked_last': False,
             }
 
         # Parse floor items from grid
@@ -457,8 +458,9 @@ class GameState:
         actions = []
 
         # Attacks (evaluated first for better alpha-beta cutoffs)
-        for kind, tid in self.attack_targets(player_id):
-            actions.append({'type': 'attack', 'target_kind': kind, 'target_id': tid})
+        if not me.get('attacked_last', False):
+            for kind, tid in self.attack_targets(player_id):
+                actions.append({'type': 'attack', 'target_kind': kind, 'target_id': tid})
 
         # Use item
         for item in me['inventory']:
@@ -505,6 +507,7 @@ class GameState:
                     card['cooldown_counter'] -= 1
         me = s.players[player_id]
         t  = action['type']
+        me['attacked_last'] = (t == 'attack')
 
         if t == 'move':
             ox, oy = me['x'], me['y']
@@ -659,7 +662,7 @@ _BALANCED = {
     'zone_opp':       500,   # bonus for opponent being near zone boundary
     'center':         1.5,   # gravity toward board center
     'aggr_base':      3.5,   # base aggression (chasing opponent)
-    'mobility':       10,    # value of extra move options
+    'mobility':       18,    # value of extra move options
     'summon_str':     1.5,   # army strength multiplier (hp+atk per summon)
     'card_ready':     80,    # value of a ready card in hand
     'card_cd':        55,    # value of a card on cooldown
@@ -672,7 +675,7 @@ PRESETS = {
     'balanced': _BALANCED,
     'aggressive': {**_BALANCED,
         'hp': 0.8, 'zone_me': 200, 'zone_opp': 650, 'aggr_base': 6.5,
-        'mobility': 5, 'summon_str': 2.0, 'card_ready': 70, 'card_cd': 50,
+        'mobility': 5, 'summon_str': 2.0, 'card_ready': 130, 'card_cd': 50,
     },
     'defensive': {**_BALANCED,
         'hp': 2.5, 'zone_me': 650, 'aggr_base': 2.5,
@@ -964,16 +967,20 @@ def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset(), W=No
 
 # ─────────────────────────── Public entry point ─────────────────────────────
 
-def decide(raw_state, my_id, depth=3, turn=0, recent_positions=None, preset='balanced'):
+def decide(raw_state, my_id, depth=3, turn=0, recent_positions=None, preset='balanced',
+           my_attacked_last=False):
     """
     Call this on your turn with the raw server JSON and your player ID.
-    `turn`     — current game turn counter (tracked externally).
+    `turn`             — current game turn counter (tracked externally).
     `recent_positions` — list of (x,y) tuples visited recently (anti-oscillation).
-    `preset`   — strategy preset: 'balanced' | 'aggressive' | 'defensive' | 'summoner'
+    `preset`           — strategy preset: 'balanced' | 'aggressive' | 'defensive' | 'summoner'
+    `my_attacked_last` — True if this player attacked on their previous turn (no consecutive attacks).
     Returns the best action dict.
     """
     W     = PRESETS.get(preset, PRESETS['balanced'])
     state = GameState.from_json(raw_state, turn=turn)
+    if my_id in state.players:
+        state.players[my_id]['attacked_last'] = my_attacked_last
     avoid_xy = frozenset(recent_positions or [])
     _, action = minimax(state, depth, -float('inf'), float('inf'), my_id,
                           is_max=True, avoid_xy=avoid_xy, W=W)
