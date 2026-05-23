@@ -9,16 +9,16 @@ def _to_int(value, default=None):
         return default
 
 
-_BLOCKED_INT = {3, 5, 6}
-_BLOCKED_STR = {'OBSTACLE', 'WALL', 'EMPTY'}
+_BLOCKED_INT = {5, 6}   # 5=wall, 6=empty/void; 0=spawn, 2=slow, 3=spikes all walkable
+_BLOCKED_STR = {'WALL', 'EMPTY'}
 
 
 def _is_blocked_field(field):
     if not isinstance(field, dict):
         return False
 
-    if not _is_none(field.get('Obstacle')):
-        return True
+    # Entities, items, and monster cards block movement
+    # Obstacles (spikes) are walkable — they deal damage but don't block
     if not _is_none(field.get('Entity')):
         return True
     if not _is_none(field.get('MonsterCard')):
