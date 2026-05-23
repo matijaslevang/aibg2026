@@ -23,7 +23,7 @@ class BotTemplate:
     
     def find_my_player_id(self, game_state):
         players = game_state.get('Players', {})
-        for player_id, player in players.items():
+        for _, player in players.items():
             if player.get('Name') == self.bot_name:
                 self.player_id = player.get('Id')
                 return True
@@ -49,7 +49,7 @@ class BotTemplate:
     def submit_move(self, x, y):
         url = f"{self.server_url}/player/move/gameId/{self.game_id}"
         body = {"playerId": self.player_id, "newPosition": {"X": x, "Y": y}}
-        response = requests.put(url, json=body, timeout=5)
+        response = requests.put(url, json=body, timeout=30)
         return response.json() if response.status_code == 200 else None
 
 if __name__ == "__main__":
