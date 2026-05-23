@@ -76,6 +76,20 @@ def _item_value(item, holder_hp=None, holder_max_hp=None, inventory_size=0, max_
     return 45 * inv_factor
 
 
+def _effective_hp(player):
+    """Current HP plus all healing that inventory potions could restore."""
+    max_hp = player['max_hp']
+    total_heal = 0
+    for item in player['inventory']:
+        name   = (item.get('name')   or '').lower()
+        effect = (item.get('effect') or '').lower()
+        power  = item.get('power', 0) or 0
+        if 'heal' in name or 'heal' in effect or 'life' in name:
+            heal = int(max_hp * power / 100) if 0 < power <= 100 else (power or 50)
+            total_heal += heal
+    return min(max_hp, player['hp'] + total_heal)
+
+
 def _summon_type(sm):
     """Identify summon type from name (preferred) or ATK stat fallback."""
     name = (sm.get('name') or '').lower()
@@ -572,11 +586,13 @@ class GameState:
             card = action.get('_card', {})
             sx, sy = action['x'], action['y']
             s.summons.append({
-                'id':       f"s{player_id}_{s.turn}",
-                'owner_id': player_id,
+                'id':        f"s{player_id}_{s.turn}",
+                'name':      card.get('name', ''),
+                'owner_id':  player_id,
                 'x': sx, 'y': sy,
-                'hp':  card.get('monster_hp', 30),
-                'atk': card.get('monster_atk', 20),
+                'hp':        card.get('monster_hp', 30),
+                'atk':       card.get('monster_atk', 20),
+                'inventory': [],
             })
             s.occupied.add((sx, sy))
             for c in me['cards']:
@@ -682,6 +698,8 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     opp_id = opp_ids[0]
     me  = state.players[my_id]
     opp = state.players[opp_id]
+    me_ehp  = _effective_hp(me)
+    opp_ehp = _effective_hp(opp)
 
     # Terminal states
     if me['hp'] <= 0 or zone_danger(me['x'], me['y'], state.turn, 0, state.board_w):
@@ -691,8 +709,8 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
 
     score = 0.0
 
-    # HP advantage
-    score += (me['hp'] - opp['hp']) * W['hp']
+    # HP advantage (effective HP accounts for healing items in inventory)
+    score += (me_ehp - opp_ehp) * W['hp']
 
     # Zone safety (linear ramp: 0 at turn 0 → 1.0 at phase turn)
     me_prox  = zone_proximity(me['x'],  state.turn, lookahead, state.board_w)
@@ -719,20 +737,45 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     badly_behind  = me['hp'] * 1.25 < opp['hp']
     score -= dist * (aggr_weight if not badly_behind else -0.5)
 
-    # Attack opportunity bonuses
+    # Attack opportunity bonuses (use eHP: opponent may heal before we finish them)
     if dist <= me['atk_range']:
-        if me['atk'] >= opp['hp']:
-            score += 8000   # one-shot: near-terminal value
+        if me['atk'] >= opp_ehp:
+            score += 8000   # one-shot even through their heals: near-terminal value
         else:
             score += me['atk'] * 5   # in range to deal meaningful damage
     # Mirror: heavily penalise giving the opponent a one-shot on us
-    if dist <= opp['atk_range'] and opp['atk'] >= me['hp']:
+    if dist <= opp['atk_range'] and opp['atk'] >= me_ehp:
         score -= 6000
 
+    # Coordinated kill: player weakens a target that an allied summon can then finish
+    # — enemy summons —
+    for esm in state.summons:
+        if esm['owner_id'] != opp_id:
+            continue
+        if abs(esm['x'] - me['x']) + abs(esm['y'] - me['y']) > me['atk_range']:
+            continue
+        hp_after = esm['hp'] - me['atk']
+        if hp_after <= 0:
+            continue  # already a direct one-shot, handled above
+        for asm in state.summons:
+            if asm['owner_id'] == my_id and (esm['x'], esm['y']) in _summon_threatened_cells(asm):
+                if hp_after <= asm['atk']:
+                    score += 1500
+                    break  # one bonus per enemy summon target
+    # — enemy player (opp['hp'] used: attack lands before they can heal) —
+    if dist <= me['atk_range']:
+        hp_after = opp['hp'] - me['atk']
+        if hp_after > 0:
+            for asm in state.summons:
+                if asm['owner_id'] == my_id and (opp['x'], opp['y']) in _summon_threatened_cells(asm):
+                    if hp_after <= asm['atk']:
+                        score += 1500
+                        break
+
     # Mobility: more reachable tiles = more options = safer
-    my_moves  = len(state.move_options(my_id))
-    opp_moves = len(state.move_options(opp_id))
-    score += (my_moves - opp_moves) * W['mobility']
+    my_move_opts  = state.move_options(my_id)
+    opp_move_opts = state.move_options(opp_id)
+    score += (len(my_move_opts) - len(opp_move_opts)) * W['mobility']
 
     # Confusion penalty — confused movement is reversed and may be random
     if me['statuses'].get('Confused') or me['statuses'].get('Confusion'):
@@ -831,16 +874,25 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     for sm in state.summons:
         # Current-position threat
         threatened = _summon_threatened_cells(sm)
-        # Extended threat: union of AoE cells from all positions reachable in one move phase
+        # Extended threat: BFS summon positions up to move_d steps (walkable only),
+        # then union AoE patterns from every reachable position.
         move_d = _summon_move_dist(sm)
+        reachable = {(sm['x'], sm['y'])}
+        frontier  = reachable.copy()
+        for _ in range(move_d):
+            next_frontier = set()
+            for fx, fy in frontier:
+                for ddx, ddy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                    npos = (fx + ddx, fy + ddy)
+                    if npos not in reachable and state._structurally_walkable(*npos):
+                        reachable.add(npos)
+                        next_frontier.add(npos)
+            frontier = next_frontier
         temp = dict(sm)
         extended = set(threatened)
-        for _ in range(move_d):
-            # Expand reachable zone one step in each direction
-            for ex, ey in list(extended):
-                for ddx, ddy in [(1,0),(-1,0),(0,1),(0,-1)]:
-                    temp['x'], temp['y'] = ex + ddx, ey + ddy
-                    extended |= _summon_threatened_cells(temp)
+        for rx, ry in reachable:
+            temp['x'], temp['y'] = rx, ry
+            extended |= _summon_threatened_cells(temp)
 
         if sm['owner_id'] == opp_id:
             # Current AoE: heavy penalty
