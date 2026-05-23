@@ -47,12 +47,10 @@ def calculate_h_value(row, col, dest):
 
 
 def trace_path(cell_details, dest):
-    print("The Path is ")
     path = []
     row = dest[0]
     col = dest[1]
 
-    # Trace the path from destination to source using parent cells
     while not (cell_details[row][col].parent_i == row and cell_details[row][col].parent_j == col):
         path.append((row, col))
         temp_row = cell_details[row][col].parent_i
@@ -60,15 +58,9 @@ def trace_path(cell_details, dest):
         row = temp_row
         col = temp_col
 
-    # Add the source cell to the path
     path.append((row, col))
-    # Reverse the path to get the path from source to destination
     path.reverse()
-
-    # Print the path
-    for i in path:
-        print("->", i, end=" ")
-    print()
+    return path
 
 # Implement the A* search algorithm
 
@@ -115,9 +107,6 @@ def a_star_search(grid, src, dest):
     open_list = []
     heapq.heappush(open_list, (0.0, i, j))
 
-    # Initialize the flag for whether destination is found
-    found_dest = False
-
     # Main loop of A* search algorithm
     while len(open_list) > 0:
         # Pop the cell with the smallest f value from the open list
@@ -138,14 +127,9 @@ def a_star_search(grid, src, dest):
             if is_valid(new_i, new_j, ROW, COL) and is_unblocked(grid, new_i, new_j) and not closed_list[new_i][new_j]:
                 # If the successor is the destination
                 if is_destination(new_i, new_j, dest):
-                    # Set the parent of the destination cell
                     cell_details[new_i][new_j].parent_i = i
                     cell_details[new_i][new_j].parent_j = j
-                    print("The destination cell is found")
-                    # Trace and print the path from source to destination
-                    trace_path(cell_details, dest)
-                    found_dest = True
-                    return
+                    return trace_path(cell_details, dest)
                 else:
                     # Calculate the new f, g, and h values
                     g_new = cell_details[i][j].g + 1.0
@@ -163,9 +147,7 @@ def a_star_search(grid, src, dest):
                         cell_details[new_i][new_j].parent_i = i
                         cell_details[new_i][new_j].parent_j = j
 
-    # If the destination is not found after visiting all cells
-    if not found_dest:
-        print("Failed to find the destination cell")
+    return []
 
 # Driver Code
 

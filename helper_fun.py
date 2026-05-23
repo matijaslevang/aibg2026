@@ -9,25 +9,28 @@ def _to_int(value, default=None):
         return default
 
 
+_BLOCKED_INT = {3, 5, 6}
+_BLOCKED_STR = {'OBSTACLE', 'WALL', 'EMPTY'}
+
+
 def _is_blocked_field(field):
     if not isinstance(field, dict):
         return False
 
-    field_type = _to_int(field.get('FieldType'))
-    obstacle = field.get('Obstacle')
-    entity = field.get('Entity')
-    monster_card = field.get('MonsterCard')
-
-    if not _is_none(obstacle):
+    if not _is_none(field.get('Obstacle')):
         return True
-    if not _is_none(entity):
+    if not _is_none(field.get('Entity')):
         return True
-    if not _is_none(monster_card):
+    if not _is_none(field.get('MonsterCard')):
         return True
     if not _is_none(field.get('Item')):
         return True
 
-    return field_type in (3, 5, 6)
+    field_type_raw = field.get('FieldType')
+    field_type_int = _to_int(field_type_raw)
+    if field_type_int is not None:
+        return field_type_int in _BLOCKED_INT
+    return field_type_raw in _BLOCKED_STR
 
 
 def _field_position(field):

@@ -49,7 +49,9 @@ class BotTemplate:
     def submit_move(self, x, y):
         url = f"{self.server_url}/player/move/gameId/{self.game_id}"
         body = {"playerId": self.player_id, "newPosition": {"X": x, "Y": y}}
+        print(f"Submitting move: {body}", flush=True)
         response = requests.put(url, json=body, timeout=30)
+        print(f"Server response ({response.status_code}): {response.text}", flush=True)
         return response.json() if response.status_code == 200 else None
 
 if __name__ == "__main__":
@@ -65,6 +67,7 @@ if __name__ == "__main__":
     print(f"Connected as Player {bot.player_id}\n")
     
     state = bot.get_game_state()
+    move_queue = []
     try:
         while state and not bot.is_game_over(state):
             if bot.is_my_turn(state):
@@ -77,18 +80,28 @@ if __name__ == "__main__":
                 else:
                     poz = (poz_raw[1], poz_raw[0])
 
-                walkable = [
-                    (r, c)
-                    for r, row in enumerate(grid)
-                    for c, cell in enumerate(row)
-                    if cell == 1 and (r, c) != poz
-                    and abs(r - poz[0]) + abs(c - poz[1]) <= 4
-                ]
-                dest = random.choice(walkable) if walkable else poz
+                grid[poz[0]][poz[1]] = 1  # player's own tile is always walkable
 
-                a_star_search(grid, poz, dest)
-                new_state = bot.submit_move(dest[1], dest[0])  # API wants (X, Y)
-                state = new_state if new_state else bot.get_game_state()
+                if not move_queue:
+                    walkable = [
+                        (r, c)
+                        for r, row in enumerate(grid)
+                        for c, cell in enumerate(row)
+                        if cell == 1 and (r, c) != poz
+                        and abs(r - poz[0]) + abs(c - poz[1]) <= 4
+                    ]
+                    dest = random.choice(walkable) if walkable else poz
+                    path = a_star_search(grid, poz, dest)
+                    # skip index 0 (current position), queue the rest
+                    move_queue = list(path[1:]) if path else []
+
+                if move_queue:
+                    next_step = move_queue.pop(0)
+                    print(f"Queue remaining: {len(move_queue)}, moving to {next_step}")
+                    new_state = bot.submit_move(next_step[1], next_step[0])  # API wants (X, Y)
+                    state = new_state if new_state else bot.get_game_state()
+                else:
+                    state = bot.get_game_state()
             else:
                 time.sleep(0.5)
                 state = bot.get_game_state()
