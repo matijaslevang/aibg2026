@@ -20,8 +20,9 @@ class BotTemplate:
         self.server_url = server_url.rstrip('/')
         self.game_id    = game_id
         self.bot_name   = bot_name
-        self.player_id  = None
-        self.turn_count = 0
+        self.player_id       = None
+        self.turn_count      = 0
+        self.recent_positions = []   # last 4 positions for oscillation detection
 
     def get_game_state(self):
         url = f"{self.server_url}/game/state/{self.game_id}"
@@ -94,7 +95,17 @@ if __name__ == "__main__":
             if bot.is_my_turn(state):
                 print(f"My turn! (turn {bot.turn_count})", flush=True)
                 print_state(state)
-                action    = decide(state, bot.player_id, depth=8, turn=bot.turn_count)
+                # Record current position before moving
+                me = state.get('Players', {}).get(str(bot.player_id), {})
+                pos = me.get('Position', {})
+                if isinstance(pos, dict) and 'X' in pos:
+                    cur_xy = (int(pos['X']), int(pos['Y']))
+                    bot.recent_positions.append(cur_xy)
+                    if len(bot.recent_positions) > 4:
+                        bot.recent_positions.pop(0)
+
+                action    = decide(state, bot.player_id, depth=8, turn=bot.turn_count,
+                                   recent_positions=bot.recent_positions)
                 new_state = bot.execute_action(action)
                 if isinstance(new_state, dict):
                     bot.turn_count += 1

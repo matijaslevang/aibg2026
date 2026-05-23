@@ -53,6 +53,19 @@ def _parse_card(raw):
     }
 
 
+def _item_value(item):
+    """Strategic value of a single item by name/effect keywords."""
+    n = (item.get('name') or '').lower()
+    e = (item.get('effect') or '').lower()
+    if 'freeze' in n or 'freeze' in e:
+        return 150   # game-changing — can trap opponent in the collapsing zone
+    if 'heal' in n or 'life' in n or 'potion' in n:
+        return 100   # strong sustain
+    if 'confus' in n or 'confus' in e:
+        return 55    # mid — disrupts opponent routing
+    return 45        # generic utility
+
+
 # ─────────────────────────── Game state ─────────────────────────────────────
 
 class GameState:
@@ -75,6 +88,7 @@ class GameState:
         self.summons    = []
         self.floor_items = {}   # {(x,y): raw_field_dict}
         self.floor_cards = {}   # {(x,y): card_dict}
+        self.spike_tiles = {}   # {(x,y): damage}
 
     # ── Construction ──────────────────────────────────────────────────────────
 
@@ -152,6 +166,21 @@ class GameState:
             if parsed:
                 s.floor_cards[(cx, cy)] = (parsed, field)
 
+        # Parse spike tiles from grid
+        for field in grid_fields:
+            if not isinstance(field, dict):
+                continue
+            obstacle = field.get('Obstacle')
+            if not isinstance(obstacle, dict):
+                continue
+            dmg = int(obstacle.get('Damage', 0) or 0)
+            if dmg <= 0:
+                continue
+            pos = field.get('Position', {})
+            sx = int(pos.get('X', 0)) if isinstance(pos, dict) else 0
+            sy = int(pos.get('Y', 0)) if isinstance(pos, dict) else 0
+            s.spike_tiles[(sx, sy)] = dmg
+
         # Parse summoned monsters from grid entity fields
         for field in grid_fields:
             if not isinstance(field, dict):
@@ -195,6 +224,7 @@ class GameState:
         s.summons      = [dict(sm) for sm in self.summons]
         s.floor_items  = dict(self.floor_items)
         s.floor_cards  = dict(self.floor_cards)
+        s.spike_tiles  = self.spike_tiles  # shared, never mutated
         return s
 
     # ── Grid helpers ──────────────────────────────────────────────────────────
@@ -214,12 +244,15 @@ class GameState:
     # ── Action generation ─────────────────────────────────────────────────────
 
     def move_options(self, player_id):
-        """Up to 4 straight-line destinations (one per cardinal direction). Snow tiles cost 2."""
+        """All reachable destinations in each cardinal direction. Snow tiles cost 2 (including the starting tile)."""
         me = self.players[player_id]
         px, py, max_d = me['x'], me['y'], me['move_dist']
+        # Standing on a snow tile burns 1 MP before you take your first step
+        if self._base is not None and 0 <= py < len(self._base) and 0 <= px < len(self._base[py]):
+            if self._base[py][px] == 2:
+                max_d -= 1
         options = []
         for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-            last = None
             remaining = max_d
             cx, cy = px, py
             while remaining > 0:
@@ -233,9 +266,9 @@ class GameState:
                     break
                 remaining -= cost
                 cx, cy = nx, ny
-                last = (nx, ny)
-            if last:
-                options.append(last)
+                # Never stop on a spike tile — keep walking to clear it or skip this stop
+                if (cx, cy) not in self.spike_tiles:
+                    options.append((cx, cy))
         return options
 
     def attack_targets(self, player_id):
@@ -300,9 +333,20 @@ class GameState:
         t  = action['type']
 
         if t == 'move':
-            s.occupied.discard((me['x'], me['y']))
-            me['x'], me['y'] = action['x'], action['y']
-            s.occupied.add((me['x'], me['y']))
+            ox, oy = me['x'], me['y']
+            tx, ty = action['x'], action['y']
+            dx = 0 if tx == ox else (1 if tx > ox else -1)
+            dy = 0 if ty == oy else (1 if ty > oy else -1)
+            cx, cy = ox + dx, oy + dy
+            while True:
+                me['hp'] -= s.spike_tiles.get((cx, cy), 0)
+                if cx == tx and cy == ty:
+                    break
+                cx += dx
+                cy += dy
+            s.occupied.discard((ox, oy))
+            me['x'], me['y'] = tx, ty
+            s.occupied.add((tx, ty))
 
         elif t == 'attack':
             dmg = me['atk']
@@ -395,41 +439,36 @@ def zone_danger(x, _y, turn, lookahead, board_w):
     return False
 
 
-def zone_proximity(x, turn, lookahead, board_w, decay_tiles=8, decay_turns=10):
+def zone_proximity(x, turn, lookahead, board_w, decay_tiles=8):
     """
-    0.0–1.0 proximity score combining distance to the danger boundary
-    and how soon the next zone phase activates.
-    Both factors must be non-zero for the result to be non-zero.
+    0.0–1.0 danger score per phase: spatial proximity to that phase's boundary ×
+    linear temporal ramp (0 at turn 0 → 1.0 at the turn tiles fall off).
+    Returns the max across all phases.
     """
     t = turn + lookahead
+    best = 0.0
 
-    # Determine active boundary and turns until next phase
-    if t >= 30:
-        left, right = 6, board_w - 6
-        turns_until = 0  # already active
-    elif t >= 15:
-        left, right = 3, board_w - 3
-        turns_until = max(0, 30 - t)
-    else:
-        left, right = 3, board_w - 3
-        turns_until = max(0, 15 - t)
+    for phase_turn, boundary in ((15, 3), (30, 6)):
+        # Scales from 0 at game start to 1.0 exactly when that phase activates
+        turn_factor = min(1.0, t / phase_turn)
+        if turn_factor == 0.0:
+            continue
 
-    # Turn-based urgency: ramps up over `decay_turns` turns before activation
-    turn_factor = max(0.0, 1.0 - turns_until / decay_turns)
-    if turn_factor == 0.0:
-        return 0.0
+        left, right = boundary, board_w - boundary
+        if x < left or x >= right:
+            dist_factor = 1.0          # already inside the future danger zone
+        else:
+            dist = min(x - left, right - 1 - x)
+            dist_factor = max(0.0, 1.0 - dist / decay_tiles)
 
-    if x < left or x >= right:
-        return turn_factor  # inside zone, full turn factor
+        best = max(best, turn_factor * dist_factor)
 
-    dist = min(x - left, right - 1 - x)
-    dist_factor = max(0.0, 1.0 - dist / decay_tiles)
-    return turn_factor * dist_factor
+    return best
 
 
 # ─────────────────────────── Evaluation function ────────────────────────────
 
-def evaluate(state, my_id, lookahead):
+def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
     opp_ids = [pid for pid in state.players if pid != my_id]
     if not opp_ids:
         return 0.0
@@ -445,51 +484,89 @@ def evaluate(state, my_id, lookahead):
 
     score = 0.0
 
-    # HP advantage (weight 2)
+    # HP advantage
     score += (me['hp'] - opp['hp']) * 2.0
 
-    # Zone safety prediction (scaled by distance + turn proximity)
+    # Zone safety (linear ramp: 0 at turn 0 → 1.0 at phase turn)
     me_prox  = zone_proximity(me['x'],  state.turn, lookahead, state.board_w)
     opp_prox = zone_proximity(opp['x'], state.turn, lookahead, state.board_w)
     if me_prox > 0:
         score -= 600 * me_prox
         if any('freeze' in (i.get('name') or '').lower() for i in opp['inventory']):
-            score -= 1200 * me_prox  # opponent can freeze us while we're near the edge
+            score -= 1200 * me_prox
     if opp_prox > 0:
         score += 400 * opp_prox
         if any('freeze' in (i.get('name') or '').lower() for i in me['inventory']):
-            score += 2500 * opp_prox  # we can freeze them into the danger zone
+            score += 2500 * opp_prox
 
-    # Gravity toward safe center
+    # Gravity toward safe center (both axes)
     cx = state.board_w // 2
+    cy = state.board_h // 2
     score += (abs(opp['x'] - cx) - abs(me['x'] - cx)) * 1.5
+    score += (abs(opp['y'] - cy) - abs(me['y'] - cy)) * 1.5
 
-    # Aggression: close in when ahead on HP, kite when behind
+    # Aggression: weight scales up as the zone closes in on either player
     dist = abs(me['x'] - opp['x']) + abs(me['y'] - opp['y'])
-    score -= dist * (2.0 if me['hp'] >= opp['hp'] else -1.0)
+    zone_pressure   = max(me_prox, opp_prox)
+    aggr_weight     = 2.0 * (1.0 + zone_pressure)
+    score -= dist * (aggr_weight if me['hp'] >= opp['hp'] else -1.0)
 
-    # Item values
+    # Mobility: more reachable tiles = more options = safer
+    my_moves  = len(state.move_options(my_id))
+    opp_moves = len(state.move_options(opp_id))
+    score += (my_moves - opp_moves) * 12
+
+    # Inventory item values (tiered)
     for item in me['inventory']:
-        n = (item.get('name') or '').lower()
-        score += 60 if ('heal' in n or 'life' in n) else 40
+        score += _item_value(item)
     for item in opp['inventory']:
-        n = (item.get('name') or '').lower()
-        if 'freeze' in n:
-            score -= 80 if me_prox > 0 else 40
+        score -= _item_value(item) * 0.8
+
+    # Monster card values: ready-to-summon cards are especially strong
+    for card in (me['cards'] or []):
+        if card:
+            score += 100 if card['cooldown_counter'] == 0 else 35
+    for card in (opp['cards'] or []):
+        if card:
+            score -= 75 if card['cooldown_counter'] == 0 else 25
+
+    # Floor item/card proximity: reward being closer than opponent to good loot
+    for (ix, iy), field in state.floor_items.items():
+        v = _item_value(_parse_item(field.get('Item', {}))) * 0.4
+        my_d  = abs(me['x'] - ix)  + abs(me['y'] - iy)
+        opp_d = abs(opp['x'] - ix) + abs(opp['y'] - iy)
+        score += v * max(0.0, 1.0 - my_d  / 10)
+        score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
+    for (cx_, cy_), _ in state.floor_cards.items():
+        v = 80 * 0.4   # cards treated as high-value loot
+        my_d  = abs(me['x'] - cx_)  + abs(me['y'] - cy_)
+        opp_d = abs(opp['x'] - cx_) + abs(opp['y'] - cy_)
+        score += v * max(0.0, 1.0 - my_d  / 10)
+        score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
 
     # Summon army strength
     my_pow  = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == my_id)
     opp_pow = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == opp_id)
     score  += (my_pow - opp_pow) * 0.4
 
+    # Penalise standing on spike tiles
+    my_spike  = state.spike_tiles.get((me['x'],  me['y']),  0)
+    opp_spike = state.spike_tiles.get((opp['x'], opp['y']), 0)
+    score -= my_spike  * 8
+    score += opp_spike * 5
+
+    # Penalise revisiting recent positions (breaks oscillation)
+    if (me['x'], me['y']) in avoid_xy:
+        score -= 250
+
     return score
 
 
 # ─────────────────────────── Minimax ────────────────────────────────────────
 
-def minimax(state, depth, alpha, beta, my_id, is_max):
+def minimax(state, depth, alpha, beta, my_id, is_max, avoid_xy=frozenset()):
     if depth == 0 or state.is_game_over():
-        return evaluate(state, my_id, depth), None
+        return evaluate(state, my_id, depth, avoid_xy), None
 
     opp_id     = [pid for pid in state.players if pid != my_id][0]
     current_id = my_id if is_max else opp_id
@@ -500,7 +577,7 @@ def minimax(state, depth, alpha, beta, my_id, is_max):
         best_val = -float('inf')
         for action in actions:
             val, _ = minimax(state.apply_action(current_id, action),
-                             depth - 1, alpha, beta, my_id, False)
+                             depth - 1, alpha, beta, my_id, False, avoid_xy)
             if val > best_val:
                 best_val, best_action = val, action
             alpha = max(alpha, val)
@@ -511,7 +588,7 @@ def minimax(state, depth, alpha, beta, my_id, is_max):
         best_val = float('inf')
         for action in actions:
             val, _ = minimax(state.apply_action(current_id, action),
-                             depth - 1, alpha, beta, my_id, True)
+                             depth - 1, alpha, beta, my_id, True, avoid_xy)
             if val < best_val:
                 best_val, best_action = val, action
             beta = min(beta, val)
@@ -522,13 +599,16 @@ def minimax(state, depth, alpha, beta, my_id, is_max):
 
 # ─────────────────────────── Public entry point ─────────────────────────────
 
-def decide(raw_state, my_id, depth=3, turn=0):
+def decide(raw_state, my_id, depth=3, turn=0, recent_positions=None):
     """
     Call this on your turn with the raw server JSON and your player ID.
     `turn` is the current game turn counter (tracked externally).
+    `recent_positions` is a list of (x,y) tuples visited in the last few turns.
     Returns the best action dict.
     """
     state = GameState.from_json(raw_state, turn=turn)
-    val, action = minimax(state, depth, -float('inf'), float('inf'), my_id, is_max=True)
+    avoid_xy = frozenset(recent_positions or [])
+    val, action = minimax(state, depth, -float('inf'), float('inf'), my_id,
+                          is_max=True, avoid_xy=avoid_xy)
     print(f"[minimax] turn={turn} score={val:.1f} action={action}", flush=True)
     return action
