@@ -64,9 +64,9 @@ class BotTemplate:
         elif t == 'attack':
             return api_calls.attack(gid, pid, action['target_id'])
         elif t == 'pick_up_item':
-            return api_calls.pick_up_item(gid, pid, action['x'], action['y'])
+            return api_calls.pick_up_item(gid, pid, action['_field'])
         elif t == 'pick_up_card':
-            return api_calls.pick_up_monster_card(gid, pid, action['x'], action['y'])
+            return api_calls.pick_up_item(gid, pid, action['_field'])
         elif t == 'use_item':
             return api_calls.use_item(gid, pid, action['item_id'])
         elif t == 'summon':

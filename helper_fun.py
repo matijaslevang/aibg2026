@@ -13,6 +13,16 @@ _BLOCKED_INT = {5, 6}   # 5=wall, 6=empty/void; 0=spawn, 2=slow, 3=spikes all wa
 _BLOCKED_STR = {'WALL', 'EMPTY'}
 
 
+def _is_slow_field(field):
+    if not isinstance(field, dict):
+        return False
+    field_type_raw = field.get('FieldType')
+    field_type_int = _to_int(field_type_raw)
+    if field_type_int is not None:
+        return field_type_int == 2  # OBSTACLE_SLOW
+    return field_type_raw in ('OBSTACLE_SLOW', 'SLOW')
+
+
 def _is_blocked_field(field):
     if not isinstance(field, dict):
         return False
@@ -88,7 +98,12 @@ def convert_to_grid(board):
                 x, y = _field_position(field)
                 if x is None or y is None:
                     continue
-                grid[y][x] = 0 if _is_blocked_field(field) else 1
+                if _is_blocked_field(field):
+                    grid[y][x] = 0
+                elif _is_slow_field(field):
+                    grid[y][x] = 2
+                else:
+                    grid[y][x] = 1
             return grid
 
     return []

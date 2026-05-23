@@ -34,7 +34,7 @@ def pick_up_monster_card(game_id: int, player_id: int, picking_up_x: int, pickin
 
 def pick_up_item(game_id: int, player_id: int, field_info):
     url = f"{SERVER_URL}/player/pickup/{player_id}/gameId/{game_id}"
-    body = {"FieldInfo": field_info }
+    body = field_info 
     print(f"Submitting move: player:{player_id} is trying to pick up an item on field:{field_info}", flush=True)
     response = requests.put(url, json=body)
     print(f"Server response ({response.status_code}): {response.text}", flush=True)

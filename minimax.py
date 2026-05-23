@@ -73,7 +73,7 @@ class GameState:
         self.occupied   = set()
         self.players    = {}
         self.summons    = []
-        self.floor_items = {}   # {(x,y): item_dict}
+        self.floor_items = {}   # {(x,y): raw_field_dict}
         self.floor_cards = {}   # {(x,y): card_dict}
 
     # ── Construction ──────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ class GameState:
             pos = field.get('Position', {})
             ix = int(pos.get('X', 0)) if isinstance(pos, dict) else 0
             iy = int(pos.get('Y', 0)) if isinstance(pos, dict) else 0
-            s.floor_items[(ix, iy)] = _parse_item(raw_item)
+            s.floor_items[(ix, iy)] = field
 
         # Parse floor monster cards from grid
         for field in grid_fields:
@@ -150,7 +150,7 @@ class GameState:
             cy = int(pos.get('Y', 0)) if isinstance(pos, dict) else 0
             parsed = _parse_card(raw_card)
             if parsed:
-                s.floor_cards[(cx, cy)] = parsed
+                s.floor_cards[(cx, cy)] = (parsed, field)
 
         # Parse summoned monsters from grid entity fields
         for field in grid_fields:
@@ -206,7 +206,7 @@ class GameState:
             return True
         if y >= len(self._base) or x >= len(self._base[y]):
             return False
-        return self._base[y][x] == 1
+        return self._base[y][x] in (1, 2)
 
     def walkable(self, x, y):
         return self._structurally_walkable(x, y) and (x, y) not in self.occupied
@@ -214,18 +214,25 @@ class GameState:
     # ── Action generation ─────────────────────────────────────────────────────
 
     def move_options(self, player_id):
-        """Up to 4 straight-line destinations (one per cardinal direction)."""
+        """Up to 4 straight-line destinations (one per cardinal direction). Snow tiles cost 2."""
         me = self.players[player_id]
         px, py, max_d = me['x'], me['y'], me['move_dist']
         options = []
         for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
             last = None
-            for step in range(1, max_d + 1):
-                nx, ny = px + dx * step, py + dy * step
+            remaining = max_d
+            cx, cy = px, py
+            while remaining > 0:
+                nx, ny = cx + dx, cy + dy
                 if not self._structurally_walkable(nx, ny):
                     break
                 if (nx, ny) in self.occupied:
-                    break   # blocked by another entity
+                    break
+                cost = 2 if self._base[ny][nx] == 2 else 1
+                if cost > remaining:
+                    break
+                remaining -= cost
+                cx, cy = nx, ny
                 last = (nx, ny)
             if last:
                 options.append(last)
@@ -273,11 +280,10 @@ class GameState:
         for dx, dy in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]:
             tx, ty = me['x'] + dx, me['y'] + dy
             if (tx, ty) in self.floor_items:
-                item = self.floor_items[(tx, ty)]
-                actions.append({'type': 'pick_up_item', 'x': tx, 'y': ty, '_item': item})
+                actions.append({'type': 'pick_up_item', 'x': tx, 'y': ty, '_field': self.floor_items[(tx, ty)]})
             if (tx, ty) in self.floor_cards:
-                card = self.floor_cards[(tx, ty)]
-                actions.append({'type': 'pick_up_card', 'x': tx, 'y': ty, '_card': card})
+                card, raw_field = self.floor_cards[(tx, ty)]
+                actions.append({'type': 'pick_up_card', 'x': tx, 'y': ty, '_card': card, '_field': raw_field})
 
         # Move
         for nx, ny in self.move_options(player_id):
@@ -339,13 +345,13 @@ class GameState:
         elif t == 'pick_up_item':
             pos = (action['x'], action['y'])
             if pos in s.floor_items:
-                item = s.floor_items.pop(pos)
-                me['inventory'].append(item)
+                raw_field = s.floor_items.pop(pos)
+                me['inventory'].append(_parse_item(raw_field.get('Item', {})))
 
         elif t == 'pick_up_card':
             pos = (action['x'], action['y'])
             if pos in s.floor_cards:
-                card = s.floor_cards.pop(pos)
+                card, _ = s.floor_cards.pop(pos)
                 me['cards'].append(card)
 
         elif t == 'summon':
