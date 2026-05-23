@@ -24,10 +24,10 @@ def use_item(game_id: int, player_id: int, item_id: int):
     print(f"Server response ({response.status_code}): {response.text}", flush=True)
     return response.json() if response.status_code == 200 else None
 
-def pick_up_monster_card(game_id: int, player_id: int, picking_up_x: int, picking_up_y: int):
+def pick_up_monster_card(game_id: int, player_id: int, field_info):
     url = f"{SERVER_URL}/map/pickup/{player_id}/gameId/{game_id}"
-    body = {"Position": {"X": picking_up_x, "Y": picking_up_y}}
-    print(f"Submitting move: player:{player_id} is trying to pick up a monster card on x:{picking_up_x}, y:{picking_up_y}", flush=True)
+    body = field_info 
+    print(f"Submitting move: player:{player_id} is trying to pick up a monster card on field:{field_info}", flush=True)
     response = requests.put(url, json=body)
     print(f"Server response ({response.status_code}): {response.text}", flush=True)
     return response.json() if response.status_code == 200 else None
