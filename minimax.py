@@ -559,13 +559,13 @@ def zone_proximity(x, turn, lookahead, board_w, decay_tiles=8):
 # ─────────────────────────── Strategy presets ───────────────────────────────
 
 _BALANCED = {
-    'hp':             2.0,   # HP advantage multiplier
-    'zone_me':        600,   # penalty for us being near zone boundary
-    'zone_opp':       400,   # bonus for opponent being near zone boundary
+    'hp':             1.5,   # HP advantage multiplier
+    'zone_me':        400,   # penalty for us being near zone boundary
+    'zone_opp':       500,   # bonus for opponent being near zone boundary
     'center':         1.5,   # gravity toward board center
-    'aggr_base':      2.0,   # base aggression (chasing opponent)
-    'mobility':       12,    # value of extra move options
-    'summon_str':     1.2,   # army strength multiplier (hp+atk per summon)
+    'aggr_base':      3.5,   # base aggression (chasing opponent)
+    'mobility':       10,    # value of extra move options
+    'summon_str':     1.5,   # army strength multiplier (hp+atk per summon)
     'card_ready':     80,    # value of a ready card in hand
     'card_cd':        55,    # value of a card on cooldown
     'opp_card_ready': 75,    # how much to fear opponent's ready card
@@ -576,16 +576,16 @@ _BALANCED = {
 PRESETS = {
     'balanced': _BALANCED,
     'aggressive': {**_BALANCED,
-        'hp': 1.0, 'zone_me': 350, 'aggr_base': 4.5,
-        'mobility': 6, 'summon_str': 1.6, 'card_ready': 70, 'card_cd': 50,
+        'hp': 0.8, 'zone_me': 200, 'zone_opp': 650, 'aggr_base': 6.5,
+        'mobility': 5, 'summon_str': 2.0, 'card_ready': 70, 'card_cd': 50,
     },
     'defensive': {**_BALANCED,
-        'hp': 3.5, 'zone_me': 900, 'aggr_base': 1.2,
-        'mobility': 20, 'loot': 0.6,
+        'hp': 2.5, 'zone_me': 650, 'aggr_base': 2.5,
+        'mobility': 16, 'loot': 0.6,
     },
     'summoner': {**_BALANCED,
         'summon_str': 3.0, 'card_ready': 120, 'card_cd': 90,
-        'opp_card_ready': 100, 'loot': 0.25,
+        'opp_card_ready': 100, 'aggr_base': 4.5, 'loot': 0.25,
     },
 }
 
@@ -632,11 +632,12 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     score += (abs(opp['x'] - cx) - abs(me['x'] - cx)) * W['center']
     score += (abs(opp['y'] - cy) - abs(me['y'] - cy)) * W['center']
 
-    # Aggression: weight scales up as the zone closes in on either player
+    # Aggression: chase unless significantly behind in HP (>25% disadvantage)
     dist = abs(me['x'] - opp['x']) + abs(me['y'] - opp['y'])
     zone_pressure = max(me_prox, opp_prox)
     aggr_weight   = W['aggr_base'] * (1.0 + zone_pressure)
-    score -= dist * (aggr_weight if me['hp'] >= opp['hp'] else -1.0)
+    badly_behind  = me['hp'] * 1.25 < opp['hp']
+    score -= dist * (aggr_weight if not badly_behind else -0.5)
 
     # Mobility: more reachable tiles = more options = safer
     my_moves  = len(state.move_options(my_id))
@@ -806,7 +807,6 @@ def decide(raw_state, my_id, depth=3, turn=0, recent_positions=None, preset='bal
     W     = PRESETS.get(preset, PRESETS['balanced'])
     state = GameState.from_json(raw_state, turn=turn)
     avoid_xy = frozenset(recent_positions or [])
-    val, action = minimax(state, depth, -float('inf'), float('inf'), my_id,
+    _, action = minimax(state, depth, -float('inf'), float('inf'), my_id,
                           is_max=True, avoid_xy=avoid_xy, W=W)
-    print(f"[minimax] turn={turn} preset={preset} score={val:.1f} action={action}", flush=True)
     return action

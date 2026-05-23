@@ -1,18 +1,11 @@
 """Monster Hunt Bot — Minimax strategy
 Usage: python index.py <server_url> <game_id> <bot_name>
 """
-import json
 import requests
 import sys
 import time
 from minimax import decide
 import api_calls
-
-
-def print_state(state):
-    # Strip the Grid to keep output readable
-    condensed = {k: v for k, v in state.items() if k != 'Map'}
-    print(json.dumps(condensed, indent=2), flush=True)
 
 
 class BotTemplate:
@@ -67,7 +60,6 @@ class BotTemplate:
                 # Server reverses confused moves: send the mirror so we land where we intend
                 px, py = cur_pos
                 tx, ty = 2 * px - tx, 2 * py - ty
-                print(f"[confused] flipping move to ({tx},{ty})", flush=True)
             return api_calls.move(gid, pid, tx, ty)
         elif t == 'attack':
             return api_calls.attack(gid, pid, action['target_id'])
@@ -80,7 +72,6 @@ class BotTemplate:
         elif t == 'summon':
             return api_calls.summon(gid, pid, action['card_id'], action['x'], action['y'])
         else:
-            print(f"[bot] skip / unknown action: {action}", flush=True)
             return None
 
 
@@ -92,19 +83,14 @@ def run(preset='balanced'):
         sys.exit(1)
 
     bot = BotTemplate(sys.argv[1], sys.argv[2], sys.argv[3], preset=preset)
-    print(f"Strategy preset: {preset}", flush=True)
 
     while not (state := bot.get_game_state()) or not bot.find_my_player_id(state):
         time.sleep(0.5)
-
-    print(f"Connected as Player {bot.player_id}\n", flush=True)
 
     state = bot.get_game_state()
     try:
         while state and not bot.is_game_over(state):
             if bot.is_my_turn(state):
-                print(f"My turn! (turn {bot.turn_count})", flush=True)
-                print_state(state)
                 me  = state.get('Players', {}).get(str(bot.player_id), {})
                 pos = me.get('Position', {})
                 if isinstance(pos, dict) and 'X' in pos:
@@ -129,7 +115,7 @@ def run(preset='balanced'):
                 time.sleep(0.5)
                 state = bot.get_game_state()
     except KeyboardInterrupt:
-        print("\nBot stopped by user")
+        pass
 
 
 if __name__ == "__main__":
