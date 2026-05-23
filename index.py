@@ -50,7 +50,7 @@ class BotTemplate:
         url = f"{self.server_url}/player/move/gameId/{self.game_id}"
         body = {"playerId": self.player_id, "newPosition": {"X": x, "Y": y}}
         print(f"Submitting move: {body}", flush=True)
-        response = requests.put(url, json=body, timeout=30)
+        response = requests.put(url, json=body)
         print(f"Server response ({response.status_code}): {response.text}", flush=True)
         return response.json() if response.status_code == 200 else None
 
@@ -82,6 +82,9 @@ if __name__ == "__main__":
 
                 grid[poz[0]][poz[1]] = 1  # player's own tile is always walkable
 
+                # drop queued steps that are now blocked
+                move_queue = [step for step in move_queue if grid[step[0]][step[1]] == 1]
+
                 if not move_queue:
                     walkable = [
                         (r, c)
@@ -96,9 +99,19 @@ if __name__ == "__main__":
                     move_queue = list(path[1:]) if path else []
 
                 if move_queue:
-                    next_step = move_queue.pop(0)
-                    print(f"Queue remaining: {len(move_queue)}, moving to {next_step}")
-                    new_state = bot.submit_move(next_step[1], next_step[0])  # API wants (X, Y)
+                    # consume up to 4 steps in the same direction
+                    direction = (move_queue[0][0] - poz[0], move_queue[0][1] - poz[1])
+                    last_step = move_queue[0]
+                    steps_taken = 1
+                    move_queue.pop(0)
+                    while move_queue and steps_taken < 4:
+                        next_dir = (move_queue[0][0] - last_step[0], move_queue[0][1] - last_step[1])
+                        if next_dir != direction:
+                            break
+                        last_step = move_queue.pop(0)
+                        steps_taken += 1
+                    print(f"Moving {steps_taken} steps to {last_step}, queue remaining: {len(move_queue)}", flush=True)
+                    new_state = bot.submit_move(last_step[1], last_step[0])  # API wants (X, Y)
                     state = new_state if new_state else bot.get_game_state()
                 else:
                     state = bot.get_game_state()
