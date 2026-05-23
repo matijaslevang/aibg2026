@@ -5,6 +5,9 @@ See README.md for full API documentation
 import requests
 import sys
 import time
+from search import a_star_search
+from helper_fun import convert_to_grid
+import json
 
 class BotTemplate:
     def __init__(self, server_url, game_id, bot_name):
@@ -62,7 +65,17 @@ if __name__ == "__main__":
                 print("My turn!")
                 # TODO: Implement your strategy here
                 # See README.md for available endpoints
-                
+                print(state)
+                parsed = json.loads(state)
+
+                poz = parsed['Players'][str(bot.player_id)]['Position']
+
+                # random destination for now
+                dest = (poz[0] + 1, poz[1])
+
+                # Call the A* search algorithm
+                a_star_search(convert_to_grid(parsed['Board']), poz, dest)
+
                 time.sleep(0.5)
                 state = bot.get_game_state()
             else:
