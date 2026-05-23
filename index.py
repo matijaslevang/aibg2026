@@ -82,6 +82,9 @@ if __name__ == "__main__":
 
                 grid[poz[0]][poz[1]] = 1  # player's own tile is always walkable
 
+                # drop queued steps that are now blocked
+                move_queue = [step for step in move_queue if grid[step[0]][step[1]] == 1]
+
                 if not move_queue:
                     walkable = [
                         (r, c)
