@@ -53,17 +53,43 @@ def _parse_card(raw):
     }
 
 
-def _item_value(item):
-    """Strategic value of a single item by name/effect keywords."""
+def _item_value(item, holder_hp=None, holder_max_hp=None, inventory_size=0, max_inventory=3):
+    """Strategic value of a single item, optionally scaled by holder context."""
     n = (item.get('name') or '').lower()
     e = (item.get('effect') or '').lower()
+
+    # Items lose value when inventory is full (can't pick up more)
+    inv_factor = max(0.1, 1.0 - max(0, inventory_size - max_inventory + 1) * 0.5)
+
     if 'freeze' in n or 'freeze' in e:
-        return 150   # game-changing — can trap opponent in the collapsing zone
+        return 150 * inv_factor
     if 'heal' in n or 'life' in n or 'potion' in n:
-        return 100   # strong sustain
+        # Scale heal value by how injured the holder is
+        if holder_hp is not None and holder_max_hp and holder_max_hp > 0:
+            missing_hp_ratio = 1.0 - holder_hp / holder_max_hp
+            base = 60 + 120 * missing_hp_ratio  # 60 when full HP, 180 when near death
+        else:
+            base = 100
+        return base * inv_factor
     if 'confus' in n or 'confus' in e:
-        return 55    # mid — disrupts opponent routing
-    return 45        # generic utility
+        return 55 * inv_factor
+    return 45 * inv_factor
+
+
+def _summon_threatened_cells(sm):
+    """Return the set of (x, y) cells this summon can attack based on its known stats."""
+    sx, sy = sm['x'], sm['y']
+    atk = sm.get('atk', 20)
+    if atk >= 35:
+        # Blue Warrior (ATK~40): extended cross, range 2 in cardinal directions
+        offsets = [(0, 1), (0, 2), (0, -1), (0, -2), (1, 0), (2, 0), (-1, 0), (-2, 0)]
+    elif atk >= 23:
+        # Ice Golem (ATK~25): asymmetric 6-cell pattern (diagonals + flanks)
+        offsets = [(-1, -1), (0, -1), (-1, 0), (1, 0), (0, 1), (1, 1)]
+    else:
+        # Ice Cube (ATK~20): standard adjacent cross
+        offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+    return {(sx + dx, sy + dy) for dx, dy in offsets}
 
 
 # ─────────────────────────── Game state ─────────────────────────────────────
@@ -106,7 +132,10 @@ class GameState:
         for field in grid_fields:
             if not isinstance(field, dict):
                 continue
-            if not _none(field.get('Entity')) or not _none(field.get('MonsterCard')):
+            # Items, monster cards, and entities all block movement but are tracked separately;
+            # mark their cells as structurally walkable so pickup simulation can re-open them.
+            if (not _none(field.get('Entity')) or not _none(field.get('MonsterCard'))
+                    or not _none(field.get('Item'))):
                 pos = field.get('Position', {})
                 if isinstance(pos, dict):
                     ex, ey = pos.get('X'), pos.get('Y')
@@ -200,6 +229,7 @@ class GameState:
                 'x': ex, 'y': ey,
                 'hp':  int(entity.get('Health', 20)),
                 'atk': int(entity.get('AttackPower', 20)),
+                'inventory': [_parse_item(i) for i in (entity.get('Inventory') or []) if not _none(i)],
             })
 
         return s
@@ -221,7 +251,7 @@ class GameState:
             cp['cards']     = [dict(c) if c else None for c in p['cards']]
             cp['statuses']  = dict(p['statuses'])
             s.players[pid]  = cp
-        s.summons      = [dict(sm) for sm in self.summons]
+        s.summons      = [{**sm, 'inventory': list(sm.get('inventory', []))} for sm in self.summons]
         s.floor_items  = dict(self.floor_items)
         s.floor_cards  = dict(self.floor_cards)
         s.spike_tiles  = self.spike_tiles  # shared, never mutated
@@ -239,7 +269,13 @@ class GameState:
         return self._base[y][x] in (1, 2)
 
     def walkable(self, x, y):
-        return self._structurally_walkable(x, y) and (x, y) not in self.occupied
+        if not self._structurally_walkable(x, y):
+            return False
+        if (x, y) in self.occupied:
+            return False
+        if (x, y) in self.floor_items or (x, y) in self.floor_cards:
+            return False
+        return True
 
     # ── Action generation ─────────────────────────────────────────────────────
 
@@ -260,6 +296,8 @@ class GameState:
                 if not self._structurally_walkable(nx, ny):
                     break
                 if (nx, ny) in self.occupied:
+                    break
+                if (nx, ny) in self.floor_items or (nx, ny) in self.floor_cards:
                     break
                 cost = 2 if self._base[ny][nx] == 2 else 1
                 if cost > remaining:
@@ -516,11 +554,23 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
     opp_moves = len(state.move_options(opp_id))
     score += (my_moves - opp_moves) * 12
 
-    # Inventory item values (tiered)
+    # Confusion penalty — confused movement is reversed and may be random
+    if me['statuses'].get('Confused') or me['statuses'].get('Confusion'):
+        score -= 150
+    if opp['statuses'].get('Confused') or opp['statuses'].get('Confusion'):
+        score += 100
+
+    # Frozen is accounted for in generate_actions (only skip allowed), but penalise in eval too
+    if opp['statuses'].get('Frozen'):
+        score += 200
+
+    # Inventory item values (context-aware)
+    inv_sz_me  = len(me['inventory'])
+    inv_sz_opp = len(opp['inventory'])
     for item in me['inventory']:
-        score += _item_value(item)
+        score += _item_value(item, me['hp'], me['max_hp'], inv_sz_me)
     for item in opp['inventory']:
-        score -= _item_value(item) * 0.8
+        score -= _item_value(item, opp['hp'], opp['max_hp'], inv_sz_opp) * 0.8
 
     # Monster card values: ready-to-summon cards are especially strong
     for card in (me['cards'] or []):
@@ -532,7 +582,8 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
 
     # Floor item/card proximity: reward being closer than opponent to good loot
     for (ix, iy), field in state.floor_items.items():
-        v = _item_value(_parse_item(field.get('Item', {}))) * 0.4
+        v = _item_value(_parse_item(field.get('Item', {})),
+                        me['hp'], me['max_hp'], len(me['inventory'])) * 0.4
         my_d  = abs(me['x'] - ix)  + abs(me['y'] - iy)
         opp_d = abs(opp['x'] - ix) + abs(opp['y'] - iy)
         score += v * max(0.0, 1.0 - my_d  / 10)
@@ -548,6 +599,22 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset()):
     my_pow  = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == my_id)
     opp_pow = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == opp_id)
     score  += (my_pow - opp_pow) * 0.4
+
+    # Summon AoE danger: penalise standing in enemy summon attack zones
+    my_pos  = (me['x'],  me['y'])
+    opp_pos = (opp['x'], opp['y'])
+    for sm in state.summons:
+        threatened = _summon_threatened_cells(sm)
+        if sm['owner_id'] == opp_id:
+            if my_pos in threatened:
+                score -= sm['atk'] * 4   # being in enemy summon AoE is very dangerous
+            if opp_pos in threatened:
+                score += sm['atk'] * 1   # friendly fire on opponent is a bonus
+        else:
+            if opp_pos in threatened:
+                score += sm['atk'] * 3   # our summon threatens the opponent
+            if my_pos in threatened:
+                score -= sm['atk'] * 1   # our own summon hits us
 
     # Penalise standing on spike tiles
     my_spike  = state.spike_tiles.get((me['x'],  me['y']),  0)

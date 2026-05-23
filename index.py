@@ -53,7 +53,7 @@ class BotTemplate:
     def is_game_over(self, game_state):
         return not game_state or game_state.get('GameState', '') == 'Ending'
 
-    def execute_action(self, action):
+    def execute_action(self, action, is_confused=False, cur_pos=None):
         """Dispatch the minimax action to the correct API call."""
         if not action:
             return None
@@ -61,7 +61,13 @@ class BotTemplate:
         t = action.get('type')
 
         if t == 'move':
-            return api_calls.move(gid, pid, action['x'], action['y'])
+            tx, ty = action['x'], action['y']
+            if is_confused and cur_pos:
+                # Server reverses confused moves: send the mirror so we land where we intend
+                px, py = cur_pos
+                tx, ty = 2 * px - tx, 2 * py - ty
+                print(f"[confused] flipping move to ({tx},{ty})", flush=True)
+            return api_calls.move(gid, pid, tx, ty)
         elif t == 'attack':
             return api_calls.attack(gid, pid, action['target_id'])
         elif t == 'pick_up_item':
@@ -104,9 +110,15 @@ if __name__ == "__main__":
                     if len(bot.recent_positions) > 4:
                         bot.recent_positions.pop(0)
 
-                action    = decide(state, bot.player_id, depth=8, turn=bot.turn_count,
+                action    = decide(state, bot.player_id, depth=4, turn=bot.turn_count,
                                    recent_positions=bot.recent_positions)
-                new_state = bot.execute_action(action)
+
+                # Detect confusion — server reverses our move commands when confused
+                me_raw    = state.get('Players', {}).get(str(bot.player_id), {})
+                statuses  = me_raw.get('ActiveStatuses') or {}
+                confused  = bool(statuses.get('Confused') or statuses.get('Confusion'))
+                cur_xy    = (int(pos['X']), int(pos['Y'])) if isinstance(pos, dict) and 'X' in pos else None
+                new_state = bot.execute_action(action, is_confused=confused, cur_pos=cur_xy)
                 if isinstance(new_state, dict):
                     bot.turn_count += 1
                 time.sleep(0.2)
