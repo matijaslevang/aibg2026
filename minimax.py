@@ -457,26 +457,40 @@ class GameState:
         if me['statuses'].get('Frozen'):
             return [{'type': 'skip'}]
 
+        confused = bool(me['statuses'].get('Confused') or me['statuses'].get('Confusion'))
+        opp_ids = [pid for pid in self.players if pid != player_id]
+        opp = self.players[opp_ids[0]] if opp_ids else None
+
         actions = []
 
-        # Attacks (evaluated first for better alpha-beta cutoffs)
+        # Attacks first; lethal hits sorted to front for better alpha-beta cutoffs
         if not me.get('attacked_last', False):
+            atk_actions = []
             for kind, tid in self.attack_targets(player_id):
-                actions.append({'type': 'attack', 'target_kind': kind, 'target_id': tid})
+                if kind == 'player':
+                    target_hp = self.players[tid]['hp']
+                else:
+                    sm = next((s for s in self.summons if s['id'] == tid), None)
+                    target_hp = sm['hp'] if sm else 999
+                atk_actions.append((me['atk'] < target_hp, {'type': 'attack', 'target_kind': kind, 'target_id': tid}))
+            atk_actions.sort(key=lambda x: x[0])  # False (lethal) sorts before True
+            actions.extend(a for _, a in atk_actions)
 
-        # Use item
+        # Use item (confusion doesn't affect item use)
         for item in me['inventory']:
             actions.append({'type': 'use_item', 'item_id': item['id'], '_item': item})
 
-        # Summon (card with cooldown_counter == 0, on any free adjacent cell)
+        # Summon: one action per ready card placed on the adjacent cell closest to the opponent.
+        # Reduces branching factor from (cards × adj_cells) to just (cards).
         adj = [(me['x'] + dx, me['y'] + dy)
                for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]
                if self.walkable(me['x'] + dx, me['y'] + dy)]
         for card in me['cards']:
-            if card and card['cooldown_counter'] == 0:
-                for sx, sy in adj:
-                    actions.append({'type': 'summon', 'card_id': card['id'], '_card': card,
-                                    'x': sx, 'y': sy})
+            if card and card['cooldown_counter'] == 0 and adj:
+                best = (min(adj, key=lambda p: abs(p[0] - opp['x']) + abs(p[1] - opp['y']))
+                        if opp else adj[0])
+                actions.append({'type': 'summon', 'card_id': card['id'], '_card': card,
+                                'x': best[0], 'y': best[1]})
 
         # Pick up items and monster cards on current cell or adjacent cells
         for dx, dy in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]:
@@ -487,8 +501,18 @@ class GameState:
                 card, raw_field = self.floor_cards[(tx, ty)]
                 actions.append({'type': 'pick_up_card', 'x': tx, 'y': ty, '_card': card, '_field': raw_field})
 
-        # Move
-        for nx, ny in self.move_options(player_id):
+        # Move: confused movement is reversed (pressing toward enemy goes away from them).
+        # Model: confused player can only reach cells that increase distance to the opponent.
+        move_opts = self.move_options(player_id)
+        if confused and opp:
+            ex, ey = opp['x'], opp['y']
+            cur_dist = abs(me['x'] - ex) + abs(me['y'] - ey)
+            move_opts = [(nx, ny) for nx, ny in move_opts
+                         if abs(nx - ex) + abs(ny - ey) >= cur_dist]
+        # Sort moves by distance to opponent ascending — likely best moves first → better pruning
+        if opp:
+            move_opts.sort(key=lambda p: abs(p[0] - opp['x']) + abs(p[1] - opp['y']))
+        for nx, ny in move_opts:
             actions.append({'type': 'move', 'x': nx, 'y': ny})
 
         return actions or [{'type': 'skip'}]
@@ -573,6 +597,10 @@ class GameState:
                 opp_ids = [pid for pid in s.players if pid != player_id]
                 if opp_ids:
                     s.players[opp_ids[0]]['statuses']['Frozen'] = item.get('duration', 1)
+            if 'confus' in name or 'confus' in effect:
+                opp_ids = [pid for pid in s.players if pid != player_id]
+                if opp_ids:
+                    s.players[opp_ids[0]]['statuses']['Confused'] = item.get('duration', 1)
 
         elif t == 'pick_up_item':
             pos = (action['x'], action['y'])
@@ -671,7 +699,8 @@ _BALANCED = {
     'opp_card_ready': 75,    # how much to fear opponent's ready card
     'opp_card_cd':    25,
     'loot':           0.4,   # floor item/card proximity scale
-    'confusion_loot': 1.0,   # extra multiplier on confusion scroll loot value
+    'confusion_loot': 1.0,   # direct weight for confusion scroll floor value
+    'confusion_apply': 100,  # score bonus when opponent is confused
 }
 
 PRESETS = {
@@ -689,9 +718,10 @@ PRESETS = {
         'opp_card_ready': 100, 'aggr_base': 4.5, 'loot': 0.25,
     },
     'confusion_rush': {**_BALANCED,
-        'confusion_loot': 14.0,  # massively prioritize confusion scrolls on the floor
-        'loot': 0.7,             # generally more item-hungry
-        'aggr_base': 2.0,        # less fixated on chasing — detour for scrolls
+        'confusion_loot': 140.0,   # confusion scrolls are the only loot goal
+        'loot': 0.0,               # ignore all other floor items and cards
+        'aggr_base': 1.5,          # detour for scrolls instead of chasing
+        'confusion_apply': 1200,   # huge reward for getting opponent confused
     },
 }
 
@@ -760,6 +790,15 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     if dist <= opp['atk_range'] and opp['atk'] >= me['hp']:
         score -= 6000
 
+    # Turn-order advantage: first mover attacks before the opponent can respond.
+    # Amplifies (not replaces) the one-shot detection above for the cases where order matters.
+    if me.get('is_first', False):
+        if dist <= me['atk_range'] and me['atk'] >= opp['hp']:
+            score += 2000  # guaranteed kill before opponent acts this round
+    else:
+        if dist <= opp['atk_range'] and opp['atk'] >= me['hp']:
+            score -= 2000  # opponent kills us before we can act this round
+
     # Kite positioning: after attacking we can't attack next turn, so being inside
     # the opponent's range is dangerous; just outside is the ideal re-engage position.
     if me.get('attacked_last', False):
@@ -793,16 +832,19 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
                         score += 1500
                         break
 
-    # Mobility: more reachable tiles = more options = safer
+    # Mobility: more reachable tiles = more options = safer.
+    # Confused players can't direct their movement, so their effective mobility is 0.
     my_move_opts  = state.move_options(my_id)
     opp_move_opts = state.move_options(opp_id)
-    score += (len(my_move_opts) - len(opp_move_opts)) * W['mobility']
+    opp_eff_moves = (0 if (opp['statuses'].get('Confused') or opp['statuses'].get('Confusion'))
+                     else len(opp_move_opts))
+    score += (len(my_move_opts) - opp_eff_moves) * W['mobility']
 
     # Confusion penalty — confused movement is reversed and may be random
     if me['statuses'].get('Confused') or me['statuses'].get('Confusion'):
         score -= 150
     if opp['statuses'].get('Confused') or opp['statuses'].get('Confusion'):
-        score += 100
+        score += W.get('confusion_apply', 100)
 
     # Frozen is accounted for in generate_actions (only skip allowed), but penalise in eval too
     if opp['statuses'].get('Frozen'):
@@ -867,21 +909,23 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
         raw_item = _parse_item(field.get('Item', {}))
         item_n = (raw_item.get('name') or '').lower()
         item_e = (raw_item.get('effect') or '').lower()
-        confusion_mult = W.get('confusion_loot', 1.0) if ('confus' in item_n or 'confus' in item_e) else 1.0
-        v = _item_value(raw_item, me['hp'], me['max_hp'], inv_sz_me) * W['loot'] * spike_discount * confusion_mult
+        is_confusion = 'confus' in item_n or 'confus' in item_e
+        loot_weight = W.get('confusion_loot', W['loot']) if is_confusion else W['loot']
+        v = _item_value(raw_item, me['hp'], me['max_hp'], inv_sz_me) * loot_weight * spike_discount
         if my_reachable:
             score += v * max(0.0, 1.0 - my_d  / 10)
         if opp_reachable:
             score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
 
-    for (fcx, fcy), _ in state.floor_cards.items():
+    for (fcx, fcy), (card, _) in state.floor_cards.items():
         my_d  = abs(me['x'] - fcx) + abs(me['y'] - fcy)
         opp_d = abs(opp['x'] - fcx) + abs(opp['y'] - fcy)
         my_reachable  = -(-my_d  // my_spd)  < turns_until_reset
         opp_reachable = -(-opp_d // opp_spd) < turns_until_reset
         if not my_reachable and not opp_reachable:
             continue
-        v = 80 * W['loot']
+        # Value scaled by monster strength: Ice Mage (high atk) > Ice Warrior > Ice Cube
+        v = (card['monster_atk'] * 1.5 + card['monster_hp'] * 0.5) * W['loot']
         if my_reachable:
             score += v * max(0.0, 1.0 - my_d  / 10)
         if opp_reachable:
@@ -996,7 +1040,7 @@ def _search_root(args):
 
 
 def decide(raw_state, my_id, depth=5, turn=0, recent_positions=None, preset='balanced',
-           my_attacked_last=False, time_limit=20.0):
+           my_attacked_last=False, opp_attacked_last=False, time_limit=20.0):
     """
     Call this on your turn with the raw server JSON and your player ID.
     Root moves searched in parallel across up to 6 workers.
@@ -1005,7 +1049,38 @@ def decide(raw_state, my_id, depth=5, turn=0, recent_positions=None, preset='bal
     state = GameState.from_json(raw_state, turn=turn)
     if my_id in state.players:
         state.players[my_id]['attacked_last'] = my_attacked_last
+    opp_ids = [pid for pid in state.players if pid != my_id]
+    if opp_ids and opp_ids[0] in state.players:
+        state.players[opp_ids[0]]['attacked_last'] = opp_attacked_last
     avoid_xy = frozenset(recent_positions or [])
+
+    # confusion_rush: greedy overrides that bypass the full search tree
+    if preset == 'confusion_rush' and my_id in state.players:
+        me = state.players[my_id]
+        opp_ids = [pid for pid in state.players if pid != my_id]
+        opp_confused = False
+        if opp_ids:
+            opp_st = state.players[opp_ids[0]].get('statuses', {})
+            opp_confused = bool(opp_st.get('Confused') or opp_st.get('Confusion'))
+
+        # 1. Use confusion scroll immediately if held and opponent is not already confused
+        if not opp_confused:
+            for item in me.get('inventory', []):
+                n = (item.get('name') or '').lower()
+                e = (item.get('effect') or '').lower()
+                if 'confus' in n or 'confus' in e:
+                    return {'type': 'use_item', 'item_id': item['id'], '_item': item}
+
+        # 2. Pick up a confusion scroll standing on the current cell before searching
+        pos = (me['x'], me['y'])
+        if pos in state.floor_items and len(me.get('inventory', [])) < 3:
+            raw_field = state.floor_items[pos]
+            raw_item = raw_field.get('Item', {})
+            if isinstance(raw_item, dict):
+                n = (raw_item.get('Name') or '').lower()
+                e = (raw_item.get('Effect') or '').lower()
+                if 'confus' in n or 'confus' in e:
+                    return {'type': 'pick_up_item', 'x': me['x'], 'y': me['y'], '_field': raw_field}
 
     actions = state.generate_actions(my_id)
     if len(actions) == 1:
