@@ -100,8 +100,7 @@ def run(preset='balanced'):
                         bot.recent_positions.pop(0)
 
                 action = decide(state, bot.player_id, turn=bot.turn_count,
-                                recent_positions=bot.recent_positions, preset=bot.preset,
-                                time_limit=15.5)
+                                recent_positions=bot.recent_positions, preset=bot.preset)
 
                 me_raw   = state.get('Players', {}).get(str(bot.player_id), {})
                 statuses = me_raw.get('ActiveStatuses') or {}

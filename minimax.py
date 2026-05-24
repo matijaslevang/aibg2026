@@ -986,11 +986,11 @@ def _search_root(args):
     return val, action
 
 
-def decide(raw_state, my_id, depth=12, turn=0, recent_positions=None, preset='balanced',
+def decide(raw_state, my_id, depth=5, turn=0, recent_positions=None, preset='balanced',
            my_attacked_last=False, time_limit=20.0):
     """
     Call this on your turn with the raw server JSON and your player ID.
-    Iterative deepening with root moves searched in parallel across up to 6 workers.
+    Root moves searched in parallel across up to 6 workers.
     """
     W     = PRESETS.get(preset, PRESETS['balanced'])
     state = GameState.from_json(raw_state, turn=turn)
@@ -1002,17 +1002,10 @@ def decide(raw_state, my_id, depth=12, turn=0, recent_positions=None, preset='ba
     if len(actions) == 1:
         return actions[0]
 
-    deadline    = time.time() + time_limit
-    best_action = actions[0]
-    workers     = min(len(actions), 6)
-
+    workers = min(len(actions), 6)
+    args    = [(state, a, depth, my_id, avoid_xy, W) for a in actions]
     with Pool(processes=workers) as pool:
-        for d in range(1, depth + 1):
-            if time.time() >= deadline:
-                break
-            args    = [(state, a, d, my_id, avoid_xy, W) for a in actions]
-            results = pool.map(_search_root, args)
-            best_val, best_action = max(results, key=lambda r: r[0])
-            print(f"[minimax] depth {d} done, best={best_val:.0f}, {deadline - time.time():.1f}s remaining")
+        results = pool.map(_search_root, args)
 
+    best_val, best_action = max(results, key=lambda r: r[0])
     return best_action
