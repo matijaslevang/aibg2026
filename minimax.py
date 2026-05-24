@@ -15,6 +15,7 @@ Returns an action dict:
 # summons block movement and can be attacked like players, but have no inventory or cards and don't
 
 import time
+import random
 from multiprocessing import Pool
 from helper_fun import convert_to_grid
 
@@ -74,7 +75,7 @@ def _item_value(item, holder_hp=None, holder_max_hp=None, inventory_size=0, max_
             base = 100
         return base * inv_factor
     if 'confus' in n or 'confus' in e:
-        return 85 * inv_factor
+        return 40 * inv_factor
     return 45 * inv_factor
 
 
@@ -480,15 +481,27 @@ class GameState:
         for item in me['inventory']:
             actions.append({'type': 'use_item', 'item_id': item['id'], '_item': item})
 
-        # Summon: one action per ready card placed on the adjacent cell closest to the opponent.
-        # Reduces branching factor from (cards × adj_cells) to just (cards).
+        # Summon: one action per ready card. Pick the adjacent cell that is closest to the
+        # opponent but does NOT lie between us and the board center (to avoid self-blocking).
         adj = [(me['x'] + dx, me['y'] + dy)
                for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]
                if self.walkable(me['x'] + dx, me['y'] + dy)]
         for card in me['cards']:
             if card and card['cooldown_counter'] == 0 and adj:
-                best = (min(adj, key=lambda p: abs(p[0] - opp['x']) + abs(p[1] - opp['y']))
-                        if opp else adj[0])
+                if opp:
+                    cx_board = self.board_w // 2
+                    cy_board = self.board_h // 2
+                    # Score each cell: distance to opponent (lower=better) + penalty if it
+                    # increases our distance to the center (blocking our escape route).
+                    def _summon_cell_score(p):
+                        to_opp = abs(p[0] - opp['x']) + abs(p[1] - opp['y'])
+                        center_now  = abs(me['x'] - cx_board) + abs(me['y'] - cy_board)
+                        center_via  = abs(p[0] - cx_board)   + abs(p[1] - cy_board)
+                        blocking_penalty = 30 if center_via < center_now else 0
+                        return to_opp + blocking_penalty
+                    best = min(adj, key=_summon_cell_score)
+                else:
+                    best = adj[0]
                 actions.append({'type': 'summon', 'card_id': card['id'], '_card': card,
                                 'x': best[0], 'y': best[1]})
 
@@ -699,8 +712,8 @@ _BALANCED = {
     'opp_card_ready': 75,    # how much to fear opponent's ready card
     'opp_card_cd':    25,
     'loot':           0.4,   # floor item/card proximity scale
-    'confusion_loot': 1.0,   # direct weight for confusion scroll floor value
-    'confusion_apply': 100,  # score bonus when opponent is confused
+    'confusion_loot': 0.5,   # direct weight for confusion scroll floor value
+    'confusion_apply': 50,   # score bonus when opponent is confused
 }
 
 PRESETS = {
@@ -776,7 +789,7 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     # Opponent near zone → chase harder; we near zone → retreat takes priority.
     dist = abs(me['x'] - opp['x']) + abs(me['y'] - opp['y'])
     aggr_weight  = W['aggr_base'] * (1.0 + opp_prox) * max(0.2, 1.0 - me_prox)
-    badly_behind = me['hp'] * 1.25 < opp['hp']
+    badly_behind = me_ehp * 1.25 < opp_ehp
     score -= dist * (aggr_weight if not badly_behind else -0.5)
 
     # Attack opportunity bonuses (use eHP: opponent may heal before we finish them)
@@ -832,6 +845,31 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
                         score += 1500
                         break
 
+    # Coordinated kill defense: symmetric penalty when opponent can combo-kill us
+    # — opponent player weakens our summons —
+    for asm in state.summons:
+        if asm['owner_id'] != my_id:
+            continue
+        if abs(asm['x'] - opp['x']) + abs(asm['y'] - opp['y']) > opp['atk_range']:
+            continue
+        hp_after = asm['hp'] - opp['atk']
+        if hp_after <= 0:
+            continue  # direct one-shot already captured in summon strength delta
+        for esm in state.summons:
+            if esm['owner_id'] == opp_id and (asm['x'], asm['y']) in _summon_threatened_cells(esm):
+                if hp_after <= esm['atk']:
+                    score -= 1500
+                    break
+    # — opponent player weakens us, their summon finishes —
+    if dist <= opp['atk_range']:
+        hp_after = me['hp'] - opp['atk']
+        if hp_after > 0:
+            for esm in state.summons:
+                if esm['owner_id'] == opp_id and (me['x'], me['y']) in _summon_threatened_cells(esm):
+                    if hp_after <= esm['atk']:
+                        score -= 1500
+                        break
+
     # Mobility: more reachable tiles = more options = safer.
     # Confused players can't direct their movement, so their effective mobility is 0.
     my_move_opts  = state.move_options(my_id)
@@ -883,11 +921,20 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
 
     for card in (me['cards'] or []):
         if card:
-            base = W['card_ready'] if card['cooldown_counter'] == 0 else W['card_cd']
-            score += base + (summon_bonus if card['cooldown_counter'] == 0 else 0)
+            if card['cooldown_counter'] == 0:
+                base = W['card_ready']
+                score += base + summon_bonus
+            else:
+                frac = card['cooldown_counter'] / max(1, card['cooldown'])
+                base = W['card_ready'] * (1.0 - frac) + W['card_cd'] * frac
+                score += base
     for card in (opp['cards'] or []):
         if card:
-            score -= W['opp_card_ready'] if card['cooldown_counter'] == 0 else W['opp_card_cd']
+            if card['cooldown_counter'] == 0:
+                score -= W['opp_card_ready']
+            else:
+                frac = card['cooldown_counter'] / max(1, card['cooldown'])
+                score -= W['opp_card_ready'] * (1.0 - frac) + W['opp_card_cd'] * frac
 
     # Floor item/card proximity: only value loot reachable before the next reset
     turns_until_reset = 20 - (state.turn % 20) if state.turn % 20 != 0 else 20
@@ -931,6 +978,16 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
         if opp_reachable:
             score -= v * max(0.0, 1.0 - opp_d / 10) * 0.7
 
+    # Make-room-for-cards: inventory full + reachable card nearby → penalise holding low-value items
+    if inv_sz_me >= 3 and state.floor_cards:
+        nearest_card_d = min(
+            abs(me['x'] - fcx) + abs(me['y'] - fcy)
+            for fcx, fcy in state.floor_cards
+        )
+        if -(-nearest_card_d // my_spd) < turns_until_reset:
+            # Penalty scales with how close the card is — urgent if adjacent
+            score -= max(0.0, 1.0 - nearest_card_d / 8.0) * 120
+
     # Summon army strength
     my_pow  = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == my_id)
     opp_pow = sum(sm['hp'] + sm['atk'] for sm in state.summons if sm['owner_id'] == opp_id)
@@ -952,7 +1009,11 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
             for fx, fy in frontier:
                 for ddx, ddy in [(1,0),(-1,0),(0,1),(0,-1)]:
                     npos = (fx + ddx, fy + ddy)
-                    if npos not in reachable and state._structurally_walkable(*npos):
+                    if (npos not in reachable
+                            and state._structurally_walkable(*npos)
+                            and npos not in state.occupied
+                            and npos not in state.floor_items
+                            and npos not in state.floor_cards):
                         reachable.add(npos)
                         next_frontier.add(npos)
             frontier = next_frontier
@@ -985,9 +1046,14 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
     score -= my_spike  * 8
     score += opp_spike * 5
 
-    # Penalise revisiting recent positions (breaks oscillation)
+    # Penalise revisiting recent positions (breaks oscillation).
+    # Penalty is large enough to outweigh any single-move approach gain.
     if (me['x'], me['y']) in avoid_xy:
-        score -= 250
+        score -= 600
+
+    # Small random jitter breaks exact score ties between symmetric moves,
+    # preventing the bot from locking onto the same oscillating sequence every game.
+    score += random.uniform(-1.5, 1.5)
 
     return score
 
@@ -1054,6 +1120,24 @@ def decide(raw_state, my_id, depth=5, turn=0, recent_positions=None, preset='bal
         state.players[opp_ids[0]]['attacked_last'] = opp_attacked_last
     avoid_xy = frozenset(recent_positions or [])
 
+    # Greedy freeze override (all presets): use freeze scroll immediately when opponent is
+    # near the zone boundary — the zone+freeze multiplier in eval makes this nearly always
+    # the best action, but the override guarantees it doesn't get delayed by a marginal attack.
+    if my_id in state.players:
+        me   = state.players[my_id]
+        _opp_ids = [pid for pid in state.players if pid != my_id]
+        if _opp_ids:
+            _opp = state.players[_opp_ids[0]]
+            _opp_prox = zone_proximity(_opp['x'], turn, 0, state.board_w)
+            if _opp_prox >= 0.5:
+                _opp_frozen = bool(_opp.get('statuses', {}).get('Frozen'))
+                if not _opp_frozen:
+                    for item in me.get('inventory', []):
+                        n = (item.get('name') or '').lower()
+                        e = (item.get('effect') or '').lower()
+                        if 'freeze' in n or 'freeze' in e:
+                            return {'type': 'use_item', 'item_id': item['id'], '_item': item}
+
     # confusion_rush: greedy overrides that bypass the full search tree
     if preset == 'confusion_rush' and my_id in state.players:
         me = state.players[my_id]
@@ -1092,4 +1176,15 @@ def decide(raw_state, my_id, depth=5, turn=0, recent_positions=None, preset='bal
         results = pool.map(_search_root, args)
 
     best_val, best_action = max(results, key=lambda r: r[0])
+
+    # Hard oscillation guard: if the best root action is a move back to a recent
+    # position, override with the best action that doesn't revisit (if one exists).
+    if (avoid_xy
+            and best_action.get('type') == 'move'
+            and (best_action['x'], best_action['y']) in avoid_xy):
+        non_revisit = [(v, a) for v, a in results
+                       if a.get('type') != 'move' or (a['x'], a['y']) not in avoid_xy]
+        if non_revisit:
+            _, best_action = max(non_revisit, key=lambda r: r[0])
+
     return best_action

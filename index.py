@@ -14,9 +14,10 @@ class BotTemplate:
         self.game_id    = game_id
         self.bot_name   = bot_name
         self.preset      = preset
-        self.player_id       = None
-        self.turn_count      = 0
-        self.recent_positions = []   # last 4 positions for oscillation detection
+        self.player_id        = None
+        self.turn_count       = 0
+        self.recent_positions = []     # last 6 positions for oscillation detection
+        self.my_attacked_last = False  # tracks whether we attacked on our previous turn
 
     def get_game_state(self):
         url = f"{self.server_url}/game/state/{self.game_id}"
@@ -96,16 +97,18 @@ def run(preset='balanced'):
                 if isinstance(pos, dict) and 'X' in pos:
                     cur_xy = (int(pos['X']), int(pos['Y']))
                     bot.recent_positions.append(cur_xy)
-                    if len(bot.recent_positions) > 4:
+                    if len(bot.recent_positions) > 6:
                         bot.recent_positions.pop(0)
 
                 action = decide(state, bot.player_id, turn=bot.turn_count,
-                                recent_positions=bot.recent_positions, preset=bot.preset)
+                                recent_positions=bot.recent_positions, preset=bot.preset,
+                                my_attacked_last=bot.my_attacked_last)
 
                 me_raw   = state.get('Players', {}).get(str(bot.player_id), {})
                 statuses = me_raw.get('ActiveStatuses') or {}
                 confused = bool(statuses.get('Confused') or statuses.get('Confusion'))
                 cur_xy   = (int(pos['X']), int(pos['Y'])) if isinstance(pos, dict) and 'X' in pos else None
+                bot.my_attacked_last = (action.get('type') == 'attack')
                 new_state = bot.execute_action(action, is_confused=confused, cur_pos=cur_xy)
                 if isinstance(new_state, dict):
                     bot.turn_count += 1
