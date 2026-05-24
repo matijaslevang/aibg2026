@@ -671,6 +671,7 @@ _BALANCED = {
     'opp_card_ready': 75,    # how much to fear opponent's ready card
     'opp_card_cd':    25,
     'loot':           0.4,   # floor item/card proximity scale
+    'confusion_loot': 1.0,   # extra multiplier on confusion scroll loot value
 }
 
 PRESETS = {
@@ -686,6 +687,11 @@ PRESETS = {
     'summoner': {**_BALANCED,
         'summon_str': 3.0, 'card_ready': 120, 'card_cd': 90,
         'opp_card_ready': 100, 'aggr_base': 4.5, 'loot': 0.25,
+    },
+    'confusion_rush': {**_BALANCED,
+        'confusion_loot': 14.0,  # massively prioritize confusion scrolls on the floor
+        'loot': 0.7,             # generally more item-hungry
+        'aggr_base': 2.0,        # less fixated on chasing — detour for scrolls
     },
 }
 
@@ -858,8 +864,11 @@ def evaluate(state, my_id, lookahead, avoid_xy=frozenset(), W=None):
             (ix + ddx, iy + ddy) in state.spike_tiles
             for ddx, ddy in [(1,0),(-1,0),(0,1),(0,-1)])
         spike_discount = 0.35 if spike_nearby else 1.0
-        v = _item_value(_parse_item(field.get('Item', {})),
-                        me['hp'], me['max_hp'], inv_sz_me) * W['loot'] * spike_discount
+        raw_item = _parse_item(field.get('Item', {}))
+        item_n = (raw_item.get('name') or '').lower()
+        item_e = (raw_item.get('effect') or '').lower()
+        confusion_mult = W.get('confusion_loot', 1.0) if ('confus' in item_n or 'confus' in item_e) else 1.0
+        v = _item_value(raw_item, me['hp'], me['max_hp'], inv_sz_me) * W['loot'] * spike_discount * confusion_mult
         if my_reachable:
             score += v * max(0.0, 1.0 - my_d  / 10)
         if opp_reachable:

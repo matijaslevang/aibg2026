@@ -79,7 +79,7 @@ def run(preset='balanced'):
     """Start the bot. Call with a preset name or run this file directly."""
     if len(sys.argv) < 4:
         print("Usage: python index.py <server_url> <game_id> <bot_name> [preset]")
-        print("  preset: balanced (default) | aggressive | defensive | summoner")
+        print("  preset: balanced (default) | aggressive | defensive | summoner | confusion_rush")
         sys.exit(1)
 
     bot = BotTemplate(sys.argv[1], sys.argv[2], sys.argv[3], preset=preset)
